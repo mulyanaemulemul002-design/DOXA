@@ -17,7 +17,7 @@ const tokens: Token[] = [
 const navItems = [{ label: 'Explore', to: '/' }, { label: 'Create', to: '/create' }]
 
 function Logo() {
-  return <Link to="/" className="brand"><img src="/doxa-mark.svg" alt="DOXA" /><span>DOXA<span className="brand-dot">.</span>xyz</span></Link>
+  return <Link to="/" className="brand"><img src="/doxa-logo.png" alt="DOXA" /><span>DOXA<span className="brand-dot">.</span>xyz</span></Link>
 }
 
 function Header() {
