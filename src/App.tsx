@@ -1,6 +1,7 @@
-import { type ChangeEvent, useMemo, useRef, useState } from 'react'
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ArrowUpRight, ChevronDown, CircleHelp, Copy, ImagePlus, Menu, Search, Sparkles, Wallet, X, Zap } from 'lucide-react'
+import { ARC_TESTNET, connectArcWallet, formatWalletAddress, getInjectedProvider, readArcWalletBalances, type ArcWalletBalances } from './lib/arc'
 
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
 type Token = { id: string; name: string; ticker: string; description: string; progress: number; marketCap: number; change: number; price: number; holders: number; status: MigrationStatus; visual: string; created: string; createdMinutes: number }
@@ -16,14 +17,80 @@ const tokens: Token[] = [
 
 const navItems = [{ label: 'Explore', to: '/' }, { label: 'Create', to: '/create' }]
 
+type WalletState = {
+  account: string | null
+  balances: ArcWalletBalances | null
+  error: string | null
+}
+
+function useArcWallet() {
+  const [wallet, setWallet] = useState<WalletState>({ account: null, balances: null, error: null })
+  const [isConnecting, setIsConnecting] = useState(false)
+
+  const refreshBalances = async (account: string) => {
+    try {
+      const balances = await readArcWalletBalances(account)
+      setWallet((current) => ({ ...current, account, balances, error: null }))
+    } catch (error) {
+      setWallet((current) => ({ ...current, account, error: error instanceof Error ? error.message : 'Unable to read wallet balance.' }))
+    }
+  }
+
+  const connect = async () => {
+    setIsConnecting(true)
+    setWallet((current) => ({ ...current, error: null }))
+    try {
+      const connection = await connectArcWallet()
+      setWallet({ account: connection.account, balances: null, error: null })
+      await refreshBalances(connection.account)
+    } catch (error) {
+      setWallet((current) => ({ ...current, error: error instanceof Error ? error.message : 'Unable to connect wallet.' }))
+    } finally {
+      setIsConnecting(false)
+    }
+  }
+
+  useEffect(() => {
+    const provider = getInjectedProvider()
+    if (!provider) return
+
+    const handleAccountsChanged = (...args: unknown[]) => {
+      const accounts = args[0]
+      const account = Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0] : null
+      if (account) {
+        setWallet((current) => ({ ...current, account, error: null }))
+        void refreshBalances(account)
+      } else {
+        setWallet({ account: null, balances: null, error: null })
+      }
+    }
+    const handleChainChanged = (...args: unknown[]) => {
+      const chainId = args[0]
+      if (typeof chainId === 'string' && chainId.toLowerCase() !== ARC_TESTNET.chainId) {
+        setWallet((current) => ({ ...current, error: 'Switch your wallet back to Arc Testnet to continue.' }))
+      }
+    }
+
+    void provider.request({ method: 'eth_accounts' }).then(handleAccountsChanged)
+    provider.on?.('accountsChanged', handleAccountsChanged)
+    provider.on?.('chainChanged', handleChainChanged)
+    return () => {
+      provider.removeListener?.('accountsChanged', handleAccountsChanged)
+      provider.removeListener?.('chainChanged', handleChainChanged)
+    }
+  }, [])
+
+  return { wallet, connect, isConnecting }
+}
+
 function Logo() {
   return <Link to="/" className="brand"><img src="/doxa-logo.png" alt="DOXA" /><span>DOXA<span className="brand-dot">.</span>xyz</span></Link>
 }
 
-function Header() {
+function Header({ wallet, onConnect, isConnecting }: { wallet: WalletState; onConnect: () => void; isConnecting: boolean }) {
   const location = useLocation()
   const [menuOpen, setMenuOpen] = useState(false)
-  return <header className="site-header"><div className="header-inner"><Logo /><nav className={menuOpen ? 'nav open' : 'nav'}>{navItems.map((item) => <Link key={item.to} className={location.pathname === item.to ? 'active' : ''} to={item.to} onClick={() => setMenuOpen(false)}>{item.label}</Link>)}</nav><div className="header-actions"><button className="network"><span className="status-dot" /> ARC testnet <ChevronDown size={14} /></button><button className="connect"><Wallet size={15} /> Connect wallet</button></div><button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Open menu">{menuOpen ? <X size={20} /> : <Menu size={20} />}</button></div></header>
+  return <header className="site-header"><div className="header-inner"><Logo /><nav className={menuOpen ? 'nav open' : 'nav'}>{navItems.map((item) => <Link key={item.to} className={location.pathname === item.to ? 'active' : ''} to={item.to} onClick={() => setMenuOpen(false)}>{item.label}</Link>)}</nav><div className="header-actions"><button className="network"><span className="status-dot" /> ARC testnet <ChevronDown size={14} /></button><button className="connect" onClick={onConnect} disabled={isConnecting}><Wallet size={15} /> {isConnecting ? 'Connecting...' : wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div><button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Open menu">{menuOpen ? <X size={20} /> : <Menu size={20} />}</button></div>{wallet.error && <div className="container wallet-error" role="status">{wallet.error}</div>}</header>
 }
 
 function TokenMark({ variant, large = false }: { variant: string; large?: boolean }) {
@@ -43,16 +110,16 @@ function TrendCard({ token }: { token: Token }) {
   return <Link to={`/token/${token.id}`} className="trend-card"><div className="trend-art"><TokenMark variant={token.visual} large /><span className="trend-rank">#{tokens.indexOf(token) + 1}</span></div><div className="trend-info"><div><h3>{token.name}</h3><span>${token.ticker}</span></div><strong className="positive">+{token.change}%</strong><div className="trend-meta"><span>MC ${token.marketCap.toLocaleString()}</span><Sparkline /></div></div></Link>
 }
 
-function Explore() {
+function Explore({ onConnect, wallet, isConnecting }: { onConnect: () => void; wallet: WalletState; isConnecting: boolean }) {
   const [filter, setFilter] = useState('Trending')
   const [search, setSearch] = useState('')
   const filteredTokens = useMemo(() => tokens.filter((token) => `${token.name} ${token.ticker}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => filter === 'New' ? a.createdMinutes - b.createdMinutes : filter === 'About to graduate' ? b.progress - a.progress : b.change - a.change), [filter, search])
   const trending = [...tokens].sort((a, b) => b.change - a.change).slice(0, 4)
-  return <main><section className="hero container"><div className="hero-copy"><div className="eyebrow"><span className="pulse" /> ARC / USDC launchpad</div><h1>Find what&apos;s<br /><span>moving next.</span></h1><p>Discover the tokens gaining conviction on DOXA. Explore early, follow the curve, and find your next signal.</p><div className="hero-actions"><Link className="button primary" to="/create">Launch a token <ArrowUpRight size={16} /></Link><a className="text-link" href="#explore">Explore launches <span>↘</span></a></div></div><HeroTerminal /></section><section className="ticker"><div className="ticker-inner"><span className="ticker-label"><Zap size={14} /> Live on ARC</span><span>KEYS <b className="positive">+24.8%</b></span><span>GHOST <b className="positive">+11.2%</b></span><span>TOAD <b className="negative">-3.4%</b></span><span>NITE <b className="positive">+46.1%</b></span><span className="ticker-note">Mock market data / testnet</span></div></section><section className="discovery container"><div className="discovery-heading"><div><div className="eyebrow">Market pulse</div><h2>Trending <span>right now.</span></h2></div><span className="live-label"><span className="pulse" /> Updates live</span></div><div className="trend-grid">{trending.map((token) => <TrendCard key={token.id} token={token} />)}</div></section><section id="explore" className="explore container"><div className="explore-toolbar"><div><div className="eyebrow">The launch board</div><h2>Explore launches.</h2></div><div className="search-box"><Search size={18} /><input aria-label="Search tokens" placeholder="Search tokens, tickers, or creators" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div><div className="filter-row"><div className="filters">{['Trending', 'New', 'About to graduate'].map((item) => <button key={item} className={filter === item ? 'filter active' : 'filter'} onClick={() => setFilter(item)}>{item}</button>)}</div><span className="result-count">{filteredTokens.length} launches</span></div><div className="token-list">{filteredTokens.map((token) => <Link to={`/token/${token.id}`} className="token-row" key={token.id}><TokenMark variant={token.visual} large /><div className="token-identity"><div><h3>{token.name} <span>${token.ticker}</span></h3><p>{token.description}</p></div><StatusBadge status={token.status} /></div><div className="token-metric"><small>Market cap</small><strong>${token.marketCap.toLocaleString()}</strong></div><div className="token-metric"><small>24h change</small><strong className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change}%</strong></div><Sparkline positive={token.change >= 0} /><ArrowUpRight className="row-arrow" size={18} /></Link>)}</div></section><MobileNav /></main>
+  return <main><section className="hero container"><div className="hero-copy"><div className="eyebrow"><span className="pulse" /> ARC / USDC launchpad</div><h1>Find what&apos;s<br /><span>moving next.</span></h1><p>Discover the tokens gaining conviction on DOXA. Explore early, follow the curve, and find your next signal.</p><div className="hero-actions"><Link className="button primary" to="/create">Launch a token <ArrowUpRight size={16} /></Link><a className="text-link" href="#explore">Explore launches <span>↘</span></a></div></div><HeroTerminal /></section><section className="ticker"><div className="ticker-inner"><span className="ticker-label"><Zap size={14} /> Live on ARC</span><span>KEYS <b className="positive">+24.8%</b></span><span>GHOST <b className="positive">+11.2%</b></span><span>TOAD <b className="negative">-3.4%</b></span><span>NITE <b className="positive">+46.1%</b></span><span className="ticker-note">Mock market data / testnet</span></div></section><section className="discovery container"><div className="discovery-heading"><div><div className="eyebrow">Market pulse</div><h2>Trending <span>right now.</span></h2></div><span className="live-label"><span className="pulse" /> Updates live</span></div><div className="trend-grid">{trending.map((token) => <TrendCard key={token.id} token={token} />)}</div></section><section id="explore" className="explore container"><div className="explore-toolbar"><div><div className="eyebrow">The launch board</div><h2>Explore launches.</h2></div><div className="search-box"><Search size={18} /><input aria-label="Search tokens" placeholder="Search tokens, tickers, or creators" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div><div className="filter-row"><div className="filters">{['Trending', 'New', 'About to graduate'].map((item) => <button key={item} className={filter === item ? 'filter active' : 'filter'} onClick={() => setFilter(item)}>{item}</button>)}</div><span className="result-count">{filteredTokens.length} launches</span></div><div className="token-list">{filteredTokens.map((token) => <Link to={`/token/${token.id}`} className="token-row" key={token.id}><TokenMark variant={token.visual} large /><div className="token-identity"><div><h3>{token.name} <span>${token.ticker}</span></h3><p>{token.description}</p></div><StatusBadge status={token.status} /></div><div className="token-metric"><small>Market cap</small><strong>${token.marketCap.toLocaleString()}</strong></div><div className="token-metric"><small>24h change</small><strong className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change}%</strong></div><Sparkline positive={token.change >= 0} /><ArrowUpRight className="row-arrow" size={18} /></Link>)}</div></section><MobileNav onConnect={onConnect} wallet={wallet} isConnecting={isConnecting} /></main>
 }
 
-function MobileNav() {
-  return <nav className="mobile-nav"><Link className="active" to="/"><Search size={19} /><span>Explore</span></Link><Link to="/create"><Sparkles size={19} /><span>Create</span></Link><button><Wallet size={19} /><span>Connect</span></button></nav>
+function MobileNav({ onConnect, wallet, isConnecting }: { onConnect: () => void; wallet: WalletState; isConnecting: boolean }) {
+  return <nav className="mobile-nav"><Link className="active" to="/"><Search size={19} /><span>Explore</span></Link><Link to="/create"><Sparkles size={19} /><span>Create</span></Link><button onClick={onConnect} disabled={isConnecting}><Wallet size={19} /><span>{wallet.account ? formatWalletAddress(wallet.account) : 'Connect'}</span></button></nav>
 }
 
 function HeroTerminal() {
@@ -110,6 +177,9 @@ function MigrationCard({ status }: { status: MigrationStatus }) {
   return <div className={`migration-card ${migrated ? 'migrated' : ''}`}><div className="migration-icon">{migrated ? '✓' : <Zap size={20} />}</div><div><div className="eyebrow">{migrated ? 'Migration complete' : 'The roadmap'}</div><h3>{migrated ? 'Now trading on ARC mainnet' : status === 'graduating' ? 'Almost ready for the next stop' : 'Build toward the big move'}</h3><p>{migrated ? 'This token graduated from its bonding curve and is now available on the open market.' : 'At 100%, liquidity migrates to Uniswap on ARC Mainnet. This is a preview of what comes next.'}</p></div></div>
 }
 
-function App() { return <><Header /><Routes><Route path="/" element={<Explore />} /><Route path="/create" element={<Create />} /><Route path="/token/:id" element={<Detail />} /></Routes><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right">DOXA.xyz / 2026</span></div></footer></> }
+function App() {
+  const { wallet, connect, isConnecting } = useArcWallet()
+  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore onConnect={connect} wallet={wallet} isConnecting={isConnecting} />} /><Route path="/create" element={<Create />} /><Route path="/token/:id" element={<Detail />} /></Routes><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right">DOXA.xyz / 2026</span></div></footer></>
+}
 
 export default App
