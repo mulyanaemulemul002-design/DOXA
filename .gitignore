@@ -1,3 +1,4 @@
 node_modules/
 .env
-deployments/
+deployments/*
+!deployments/arc-testnet.json
