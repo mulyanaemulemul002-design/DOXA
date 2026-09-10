@@ -1,3 +1,5 @@
+import { decodeFunctionResult, encodeFunctionData } from 'viem'
+
 export const ARC_TESTNET = {
   chainId: '0x4cef52',
   chainIdDecimal: 5042002,
@@ -11,6 +13,8 @@ export const ARC_TESTNET = {
   },
   usdcAddress: '0x3600000000000000000000000000000000000000',
 } as const
+
+export const DOXA_LAUNCHPAD_ADDRESS = '0x1fbaaf6fb624d975e89c6e12313a161c38c15904' as const
 
 type RequestArguments = {
   method: string
@@ -32,6 +36,71 @@ export type ArcWalletBalances = {
   nativeUsdc: string
   erc20Usdc: string
 }
+
+export type ArcLaunch = {
+  token: string
+  creator: string
+  name: string
+  symbol: string
+  description: string
+  virtualNativeReserve: bigint
+  virtualTokenReserve: bigint
+  nativeReserve: bigint
+  tokenReserve: bigint
+  createdAt: bigint
+  graduated: boolean
+}
+
+const launchpadAbi = [
+  {
+    type: 'function',
+    name: 'createLaunch',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'name_', type: 'string' },
+      { name: 'symbol_', type: 'string' },
+      { name: 'description_', type: 'string' },
+    ],
+    outputs: [
+      { name: 'launchId', type: 'uint256' },
+      { name: 'token', type: 'address' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'getLaunches',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'offset', type: 'uint256' },
+      { name: 'limit', type: 'uint256' },
+    ],
+    outputs: [{
+      name: 'page',
+      type: 'tuple[]',
+      components: [
+        { name: 'token', type: 'address' },
+        { name: 'creator', type: 'address' },
+        { name: 'name', type: 'string' },
+        { name: 'symbol', type: 'string' },
+        { name: 'description', type: 'string' },
+        { name: 'virtualNativeReserve', type: 'uint256' },
+        { name: 'virtualTokenReserve', type: 'uint256' },
+        { name: 'nativeReserve', type: 'uint256' },
+        { name: 'tokenReserve', type: 'uint256' },
+        { name: 'createdAt', type: 'uint256' },
+        { name: 'graduated', type: 'bool' },
+      ],
+    }],
+  },
+] as const
+
+const tokenAbi = [{
+  type: 'function',
+  name: 'balanceOf',
+  stateMutability: 'view',
+  inputs: [{ name: 'account', type: 'address' }],
+  outputs: [{ name: '', type: 'uint256' }],
+}] as const
 
 declare global {
   interface Window {
@@ -71,6 +140,10 @@ async function getChainId(provider: Eip1193Provider): Promise<string> {
   const chainId = await provider.request({ method: 'eth_chainId' })
   if (typeof chainId !== 'string') throw new Error('Wallet returned an invalid chain ID.')
   return chainId
+}
+
+export function getConnectedProvider(): Eip1193Provider | undefined {
+  return getInjectedProvider() ?? walletConnectProvider
 }
 
 async function switchToArcTestnet(provider: Eip1193Provider): Promise<void> {
@@ -126,7 +199,7 @@ function addressArgument(address: string): string {
 }
 
 export async function readArcWalletBalances(account: string): Promise<ArcWalletBalances> {
-  const provider = getInjectedProvider() ?? walletConnectProvider
+  const provider = getConnectedProvider()
   if (!provider) throw new Error('No wallet connection found.')
 
   const [nativeBalance, erc20Balance] = await Promise.all([
@@ -148,6 +221,63 @@ export async function readArcWalletBalances(account: string): Promise<ArcWalletB
     nativeUsdc: formatUnits(BigInt(nativeBalance), ARC_TESTNET.nativeCurrency.decimals),
     erc20Usdc: formatUnits(BigInt(erc20Balance), 6),
   }
+}
+
+export async function launchTokenOnArc(account: string, name: string, symbol: string, description: string): Promise<string> {
+  const provider = getConnectedProvider()
+  if (!provider) throw new Error('No wallet connection found.')
+  const data = encodeFunctionData({
+    abi: launchpadAbi,
+    functionName: 'createLaunch',
+    args: [name, symbol, description],
+  })
+  const hash = await provider.request({
+    method: 'eth_sendTransaction',
+    params: [{ from: account, to: DOXA_LAUNCHPAD_ADDRESS, data }],
+  })
+  if (typeof hash !== 'string') throw new Error('Wallet did not return a transaction hash.')
+  return hash
+}
+
+export async function readArcLaunches(): Promise<ArcLaunch[]> {
+  const provider = getConnectedProvider()
+  if (!provider) throw new Error('No wallet connection found.')
+  const data = encodeFunctionData({
+    abi: launchpadAbi,
+    functionName: 'getLaunches',
+    args: [0n, 50n],
+  })
+  const result = await provider.request({
+    method: 'eth_call',
+    params: [{ to: DOXA_LAUNCHPAD_ADDRESS, data }, 'latest'],
+  })
+  if (typeof result !== 'string') throw new Error('Wallet returned an invalid launch list.')
+  return decodeFunctionResult({
+    abi: launchpadAbi,
+    functionName: 'getLaunches',
+    data: result as `0x${string}`,
+  }) as unknown as ArcLaunch[]
+}
+
+export async function readTokenBalance(token: string, account: string): Promise<string> {
+  const provider = getConnectedProvider()
+  if (!provider) throw new Error('No wallet connection found.')
+  const data = encodeFunctionData({
+    abi: tokenAbi,
+    functionName: 'balanceOf',
+    args: [account as `0x${string}`],
+  })
+  const result = await provider.request({
+    method: 'eth_call',
+    params: [{ to: token, data }, 'latest'],
+  })
+  if (typeof result !== 'string') throw new Error('Wallet returned an invalid token balance.')
+  const balance = decodeFunctionResult({
+    abi: tokenAbi,
+    functionName: 'balanceOf',
+    data: result as `0x${string}`,
+  }) as bigint
+  return formatUnits(balance, 18, 2)
 }
 
 export function formatWalletAddress(address: string): string {
