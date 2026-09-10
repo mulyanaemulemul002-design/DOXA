@@ -43,6 +43,30 @@ export function getInjectedProvider(): Eip1193Provider | undefined {
   return typeof window === 'undefined' ? undefined : window.ethereum
 }
 
+let walletConnectProvider: Eip1193Provider | undefined
+
+export async function getWalletConnectProvider(): Promise<Eip1193Provider | undefined> {
+  if (typeof window === 'undefined') return undefined
+  const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID
+  if (!projectId) return undefined
+  if (walletConnectProvider) return walletConnectProvider
+
+  const { EthereumProvider } = await import('@walletconnect/ethereum-provider')
+  walletConnectProvider = await EthereumProvider.init({
+    projectId,
+    chains: [ARC_TESTNET.chainIdDecimal],
+    optionalChains: [ARC_TESTNET.chainIdDecimal],
+    showQrModal: true,
+    metadata: {
+      name: 'DOXA',
+      description: 'DOXA token launchpad on Arc Testnet',
+      url: window.location.origin,
+      icons: [`${window.location.origin}/doxa-logo.png`],
+    },
+  }) as unknown as Eip1193Provider
+  return walletConnectProvider
+}
+
 async function getChainId(provider: Eip1193Provider): Promise<string> {
   const chainId = await provider.request({ method: 'eth_chainId' })
   if (typeof chainId !== 'string') throw new Error('Wallet returned an invalid chain ID.')
@@ -72,8 +96,10 @@ async function switchToArcTestnet(provider: Eip1193Provider): Promise<void> {
 }
 
 export async function connectArcWallet(): Promise<ArcWalletConnection> {
-  const provider = getInjectedProvider()
-  if (!provider) throw new Error('No browser wallet found. Install MetaMask or another EVM wallet first.')
+  const provider = getInjectedProvider() ?? await getWalletConnectProvider()
+  if (!provider) throw new Error('WalletConnect is not configured. Add VITE_WALLETCONNECT_PROJECT_ID, or install a browser wallet.')
+  const walletConnect = provider as Eip1193Provider & { connect?: () => Promise<void> }
+  if (!getInjectedProvider() && walletConnect.connect) await walletConnect.connect()
 
   if ((await getChainId(provider)).toLowerCase() !== ARC_TESTNET.chainId) {
     await switchToArcTestnet(provider)
@@ -100,8 +126,8 @@ function addressArgument(address: string): string {
 }
 
 export async function readArcWalletBalances(account: string): Promise<ArcWalletBalances> {
-  const provider = getInjectedProvider()
-  if (!provider) throw new Error('No browser wallet found.')
+  const provider = getInjectedProvider() ?? walletConnectProvider
+  if (!provider) throw new Error('No wallet connection found.')
 
   const [nativeBalance, erc20Balance] = await Promise.all([
     provider.request({ method: 'eth_getBalance', params: [account, 'latest'] }),
