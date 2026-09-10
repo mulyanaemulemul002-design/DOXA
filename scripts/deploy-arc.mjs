@@ -7,8 +7,8 @@ import {
   getAddress,
   http,
   parseUnits,
-  privateKeyToAccount,
 } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 
 const root = resolve(import.meta.dirname, '..')
 const artifact = JSON.parse(await readFile(resolve(root, 'contract-artifacts/DOXALaunchpad.json'), 'utf8'))
@@ -17,9 +17,9 @@ const admin = getAddress(process.env.DOXA_ADMIN || '0x662ddf7d320b229f701e5e628e
 const treasury = getAddress(process.env.DOXA_TREASURY || '0x4b1060f52c4af453d02826cd855f4866a6735190')
 const graduationTarget = process.env.DOXA_GRADUATION_TARGET_USDC || '10000'
 const feeBps = BigInt(process.env.DOXA_FEE_BPS || '100')
-const privateKey = process.env.PRIVATE_KEY
+const privateKey = process.env.DEPLOYER_PRIVATE_KEY
 
-if (!privateKey) throw new Error('PRIVATE_KEY is required in the environment or Replit Secrets.')
+if (!privateKey) throw new Error('DEPLOYER_PRIVATE_KEY is required in Vercel Environment Variables.')
 if (feeBps > 500n) throw new Error('DOXA_FEE_BPS cannot exceed 500 (5%).')
 
 const chain = defineChain({
