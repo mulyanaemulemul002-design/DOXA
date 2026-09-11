@@ -92,6 +92,16 @@
 .signal-chart .market-chart{background:linear-gradient(180deg,rgba(70,216,137,.11),transparent 82%)}
 .signal-chart .market-chart-grid{background:repeating-linear-gradient(to bottom,transparent 0,transparent 35px,var(--market-grid) 36px);opacity:.48}
 .chart-labels{color:#72867a;letter-spacing:.04em}
+.market-chart-toolbar{position:absolute;z-index:2;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;pointer-events:none}
+.chart-mode-toggle,.chart-metric-toggle{display:flex;gap:2px;padding:2px;border:1px solid var(--market-grid);background:rgba(5,10,7,.82);pointer-events:auto}
+.chart-mode-toggle button,.chart-metric-toggle button{border:0;background:transparent;color:#72867a;font:8px 'DM Mono';letter-spacing:.04em;padding:4px 6px;cursor:pointer}
+.chart-mode-toggle button.active,.chart-metric-toggle button.active{background:#193525;color:#d9f5e4}
+.candle-series{color:currentColor}
+.candle line{stroke:currentColor;stroke-width:1.15;vector-effect:non-scaling-stroke}
+.candle rect{fill:currentColor}
+.candle.down{color:var(--market-negative)}
+.candle.up{color:var(--market-positive)}
+.chart-labels b{margin-left:auto;color:#d9f5e4;font-weight:500}
 
 .event-label{border:1px solid currentColor!important;background:transparent!important;font-weight:500!important;letter-spacing:.04em}
 .event-label.buy{color:var(--market-positive)!important}

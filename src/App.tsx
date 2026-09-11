@@ -112,10 +112,25 @@ const chartPaths = {
   'pixel-pigeon': 'M0 68 C13 61 23 70 32 54 S46 39 57 49 S73 43 83 28 S99 35 108 20 S116 18 120 12',
 }
 
+type ChartMode = 'trend' | 'candle'
+type ChartMetric = 'price' | 'marketCap'
+
+const candleSeries: Record<string, Array<[number, number, number, number, number]>> = {
+  'keyboard-cat': [[12, 38, 31, 46, 28], [30, 45, 34, 53, 42], [48, 50, 40, 59, 48], [66, 58, 48, 70, 55], [84, 69, 57, 80, 64], [102, 77, 66, 89, 73]],
+  'arcade-ghost': [[12, 30, 22, 42, 28], [30, 40, 27, 51, 36], [48, 44, 33, 58, 40], [66, 55, 38, 66, 52], [84, 63, 49, 75, 58], [102, 74, 57, 86, 69]],
+  'toad-frog': [[12, 24, 18, 38, 30], [30, 32, 24, 46, 38], [48, 40, 31, 55, 43], [66, 52, 39, 66, 54], [84, 60, 47, 74, 63], [102, 70, 58, 84, 72]],
+  'usdc-baby': [[12, 68, 58, 76, 64], [30, 63, 52, 71, 59], [48, 57, 45, 66, 53], [66, 51, 39, 60, 46], [84, 43, 32, 54, 38], [102, 34, 22, 46, 29]],
+  'night-shift': [[12, 38, 28, 50, 34], [30, 48, 35, 60, 44], [48, 55, 43, 66, 51], [66, 64, 50, 75, 59], [84, 73, 59, 84, 68], [102, 82, 68, 92, 77]],
+  'pixel-pigeon': [[12, 32, 24, 44, 29], [30, 42, 30, 53, 38], [48, 49, 37, 61, 45], [66, 58, 45, 69, 54], [84, 66, 53, 77, 61], [102, 75, 62, 86, 70]],
+}
+
 function MarketChart({ token, large = false }: { token: Token; large?: boolean }) {
+  const [mode, setMode] = useState<ChartMode>('trend')
+  const [metric, setMetric] = useState<ChartMetric>('price')
   const line = chartPaths[token.id as keyof typeof chartPaths] || chartPaths['keyboard-cat']
   const area = `${line} L120 100 L0 100 Z`
-  return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''}`} aria-label={`${token.name} price chart`}><div className="market-chart-grid" /><svg viewBox="0 0 120 100" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id={`fill-${token.id}`} x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="currentColor" stopOpacity=".28" /><stop offset="100%" stopColor="currentColor" stopOpacity="0" /></linearGradient></defs><path className="chart-area" d={area} fill={`url(#fill-${token.id})`} /><path className="chart-line" d={line} fill="none" stroke="currentColor" strokeWidth={large ? '1.6' : '1.8'} vectorEffect="non-scaling-stroke" /></svg>{large && <div className="chart-labels"><span>1H</span><span>6H</span><span>12H</span><span>24H</span></div>}</div>
+  const candles = candleSeries[token.id] || candleSeries['keyboard-cat']
+  return <div className={`market-chart ${large ? 'large' : ''} ${mode === 'candle' ? 'candles-active' : ''} ${token.change < 0 ? 'down' : ''}`} aria-label={`${token.name} ${mode === 'trend' ? 'price trend' : 'candlestick'} chart`}><div className="market-chart-toolbar">{large && <div className="chart-mode-toggle" role="group" aria-label="Chart type"><button className={mode === 'trend' ? 'active' : ''} onClick={() => setMode('trend')} type="button">Trend</button><button className={mode === 'candle' ? 'active' : ''} onClick={() => setMode('candle')} type="button">Candles</button></div>}{large && <div className="chart-metric-toggle" role="group" aria-label="Chart metric"><button className={metric === 'price' ? 'active' : ''} onClick={() => setMetric('price')} type="button">Price</button><button className={metric === 'marketCap' ? 'active' : ''} onClick={() => setMetric('marketCap')} type="button">Market cap</button></div>}</div><div className="market-chart-grid" /><svg viewBox="0 0 120 100" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id={`fill-${token.id}`} x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="currentColor" stopOpacity=".28" /><stop offset="100%" stopColor="currentColor" stopOpacity="0" /></linearGradient></defs>{mode === 'trend' ? <><path className="chart-area" d={area} fill={`url(#fill-${token.id})`} /><path className="chart-line" d={line} fill="none" stroke="currentColor" strokeWidth={large ? '1.6' : '1.8'} vectorEffect="non-scaling-stroke" /></> : <g className="candle-series">{candles.map(([x, open, high, low, close]) => <g key={x} className={close >= open ? 'candle up' : 'candle down'}><line x1={x} x2={x} y1={high} y2={low} /><rect x={x - 3.5} y={Math.min(open, close)} width="7" height={Math.max(Math.abs(close - open), 3)} rx=".8" /></g>)}</g>}</svg>{large && <div className="chart-labels"><span>1H</span><span>6H</span><span>12H</span><span>24H</span><b>{metric === 'price' ? `$${token.price.toFixed(5)}` : `$${(token.marketCap / 1000).toFixed(1)}K`}</b></div>}</div>
 }
 
 function LiveTape() {
