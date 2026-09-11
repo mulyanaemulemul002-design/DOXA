@@ -136,10 +136,23 @@ export async function getWalletConnectProvider(): Promise<Eip1193Provider | unde
   return walletConnectProvider
 }
 
+function normalizeChainId(value: unknown): string {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (/^0x[0-9a-fA-F]+$/.test(trimmed)) return trimmed.toLowerCase()
+    if (/^\d+$/.test(trimmed)) return `0x${BigInt(trimmed).toString(16)}`
+    throw new Error('Wallet returned an invalid chain ID.')
+  }
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return `0x${value.toString(16)}`
+  }
+  if (typeof value === 'bigint') return `0x${value.toString(16)}`
+  throw new Error('Wallet returned an invalid chain ID.')
+}
+
 async function getChainId(provider: Eip1193Provider): Promise<string> {
   const chainId = await provider.request({ method: 'eth_chainId' })
-  if (typeof chainId !== 'string') throw new Error('Wallet returned an invalid chain ID.')
-  return chainId
+  return normalizeChainId(chainId)
 }
 
 export function getConnectedProvider(): Eip1193Provider | undefined {

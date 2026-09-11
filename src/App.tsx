@@ -66,8 +66,12 @@ function useArcWallet() {
       }
     }
     const handleChainChanged = (...args: unknown[]) => {
-      const chainId = args[0]
-      if (typeof chainId === 'string' && chainId.toLowerCase() !== ARC_TESTNET.chainId) {
+      const raw = args[0]
+      let chainId: string | null = null
+      if (typeof raw === 'string') chainId = /^0x/i.test(raw) ? raw.toLowerCase() : `0x${BigInt(raw).toString(16)}`
+      else if (typeof raw === 'number' && raw > 0) chainId = `0x${raw.toString(16)}`
+      else if (typeof raw === 'bigint') chainId = `0x${raw.toString(16)}`
+      if (chainId && chainId !== ARC_TESTNET.chainId) {
         setWallet((current) => ({ ...current, error: 'Switch your wallet back to Arc Testnet to continue.' }))
       }
     }
