@@ -1,4 +1,5 @@
-import { decodeFunctionResult, encodeFunctionData } from 'viem'
+import { createWalletClient, createPublicClient, http, decodeFunctionResult, encodeFunctionData, type Hex, type PrivateKeyAccount } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 
 export const ARC_TESTNET = {
   chainId: '0x4cef52',
@@ -65,6 +66,61 @@ const launchpadAbi = [
       { name: 'launchId', type: 'uint256' },
       { name: 'token', type: 'address' },
     ],
+  },
+  {
+    type: 'function',
+    name: 'buy',
+    stateMutability: 'payable',
+    inputs: [
+      { name: 'launchId', type: 'uint256' },
+      { name: 'minTokenOut', type: 'uint256' },
+    ],
+    outputs: [{ name: 'tokenOut', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'sell',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'launchId', type: 'uint256' },
+      { name: 'tokenIn', type: 'uint256' },
+      { name: 'minNativeOut', type: 'uint256' },
+    ],
+    outputs: [{ name: 'nativeOut', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'quoteBuy',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'launchId', type: 'uint256' },
+      { name: 'nativeIn', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'quoteSell',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'launchId', type: 'uint256' },
+      { name: 'tokenIn', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'progressBps',
+    stateMutability: 'view',
+    inputs: [{ name: 'launchId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'launchCount',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
   },
   {
     type: 'function',
@@ -295,4 +351,140 @@ export async function readTokenBalance(token: string, account: string): Promise<
 
 export function formatWalletAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`
+}
+
+// --- Direct RPC reads (no wallet connection needed) ---
+
+const publicClient = createPublicClient({
+  chain: {
+    id: ARC_TESTNET.chainIdDecimal,
+    name: ARC_TESTNET.name,
+    nativeCurrency: ARC_TESTNET.nativeCurrency,
+    rpcUrls: { default: { http: [ARC_TESTNET.rpcUrl] } },
+  },
+  transport: http(ARC_TESTNET.rpcUrl),
+})
+
+export async function readLaunchCount(): Promise<number> {
+  const result = await publicClient.readContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'launchCount',
+  })
+  return Number(result)
+}
+
+export async function readLaunchesDirect(): Promise<ArcLaunch[]> {
+  const count = await readLaunchCount()
+  if (count === 0) return []
+  const result = await publicClient.readContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'getLaunches',
+    args: [0n, BigInt(count)],
+  })
+  return result as unknown as ArcLaunch[]
+}
+
+export async function readQuoteBuy(launchId: number, nativeIn: bigint): Promise<bigint> {
+  const result = await publicClient.readContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'quoteBuy',
+    args: [BigInt(launchId), nativeIn],
+  })
+  return result as bigint
+}
+
+export async function readProgressBps(launchId: number): Promise<number> {
+  const result = await publicClient.readContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'progressBps',
+    args: [BigInt(launchId)],
+  })
+  return Number(result)
+}
+
+export async function readTokenBalanceDirect(token: string, account: string): Promise<string> {
+  const result = await publicClient.readContract({
+    address: token as Hex,
+    abi: tokenAbi,
+    functionName: 'balanceOf',
+    args: [account as Hex],
+  })
+  return formatUnits(result as bigint, 18, 2)
+}
+
+export async function readNativeBalanceDirect(account: string): Promise<string> {
+  const balance = await publicClient.getBalance({ address: account as Hex })
+  return formatUnits(balance, 18)
+}
+
+// --- Private-key signed transactions (for admin bot) ---
+
+function getPrivateKeyAccount(privateKey: string): PrivateKeyAccount {
+  const normalized = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`
+  return privateKeyToAccount(normalized as Hex)
+}
+
+export async function createLaunchWithPrivateKey(
+  privateKey: string,
+  name: string,
+  symbol: string,
+  description: string,
+): Promise<string> {
+  const account = getPrivateKeyAccount(privateKey)
+  const client = createWalletClient({
+    account,
+    chain: {
+      id: ARC_TESTNET.chainIdDecimal,
+      name: ARC_TESTNET.name,
+      nativeCurrency: ARC_TESTNET.nativeCurrency,
+      rpcUrls: { default: { http: [ARC_TESTNET.rpcUrl] } },
+    },
+    transport: http(ARC_TESTNET.rpcUrl),
+  })
+  const hash = await client.writeContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'createLaunch',
+    args: [name, symbol, description],
+    account,
+    chain: undefined,
+  })
+  return hash
+}
+
+export async function buyWithPrivateKey(
+  privateKey: string,
+  launchId: number,
+  nativeIn: bigint,
+  minTokenOut: bigint = 0n,
+): Promise<string> {
+  const account = getPrivateKeyAccount(privateKey)
+  const client = createWalletClient({
+    account,
+    chain: {
+      id: ARC_TESTNET.chainIdDecimal,
+      name: ARC_TESTNET.name,
+      nativeCurrency: ARC_TESTNET.nativeCurrency,
+      rpcUrls: { default: { http: [ARC_TESTNET.rpcUrl] } },
+    },
+    transport: http(ARC_TESTNET.rpcUrl),
+  })
+  const hash = await client.writeContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'buy',
+    args: [BigInt(launchId), minTokenOut],
+    value: nativeIn,
+    account,
+    chain: undefined,
+  })
+  return hash
+}
+
+export function getAccountFromPrivateKey(privateKey: string): string {
+  return getPrivateKeyAccount(privateKey).address
 }

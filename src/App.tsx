@@ -2,19 +2,68 @@ import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState 
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ArrowUpRight, ChevronDown, CircleHelp, Copy, Flame, Grid2X2, ImagePlus, ListFilter, Menu, Search, Sparkles, TrendingUp, Users, Wallet, X, Zap } from 'lucide-react'
 import { CandlestickSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
-import { ARC_TESTNET, connectArcWallet, formatWalletAddress, getInjectedProvider, launchTokenOnArc, readArcLaunches, readArcWalletBalances, readTokenBalance, type ArcLaunch, type ArcWalletBalances } from './lib/arc'
+import { ARC_TESTNET, connectArcWallet, formatWalletAddress, getInjectedProvider, getAccountFromPrivateKey, launchTokenOnArc, readArcLaunches, readArcWalletBalances, readTokenBalance, readLaunchesDirect, readNativeBalanceDirect, createLaunchWithPrivateKey, buyWithPrivateKey, type ArcLaunch, type ArcWalletBalances } from './lib/arc'
 
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
-type Token = { id: string; name: string; ticker: string; description: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number }
+type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number }
 
-const tokens: Token[] = [
-  { id: 'keyboard-cat', name: 'Keyboard Cat', ticker: 'KEYS', description: 'the sound of a million tabs closing at once.', progress: 92, marketCap: 94200, change: 24.8, price: 0.00942, holders: 842, volume: 18400, liquidity: 27600, creator: '0x52…5ccbe7', status: 'graduating', visual: 'cat', created: '18m ago', createdMinutes: 18 },
-  { id: 'arcade-ghost', name: 'Arcade Ghost', ticker: 'GHOST', description: 'insert coin. haunt the timeline.', progress: 64, marketCap: 64800, change: 11.2, price: 0.00648, holders: 611, volume: 9600, liquidity: 19400, creator: '0x9b…cbfb3f', status: 'active', visual: 'ghost', created: '42m ago', createdMinutes: 42 },
-  { id: 'toad-frog', name: 'Toad Frog', ticker: 'TOAD', description: 'not a frog. not financial advice.', progress: 41, marketCap: 41200, change: -3.4, price: 0.00412, holders: 389, volume: 4100, liquidity: 12100, creator: '0xa8…4eb2fc', status: 'active', visual: 'toad', created: '1h ago', createdMinutes: 60 },
-  { id: 'usdc-baby', name: 'USDC Baby', ticker: 'BABY', description: 'born on ARC. raised on conviction.', progress: 12, marketCap: 11900, change: 8.9, price: 0.00119, holders: 124, volume: 2200, liquidity: 6800, creator: '0x00…7d9691', status: 'active', visual: 'baby', created: '2h ago', createdMinutes: 120 },
-  { id: 'night-shift', name: 'Night Shift', ticker: 'NITE', description: 'for everyone still building after midnight.', progress: 100, marketCap: 182400, change: 46.1, price: 0.01824, holders: 1204, volume: 42600, liquidity: 52400, creator: '0x6f…9c0562', status: 'migrated', visual: 'night', created: 'yesterday', createdMinutes: 1440 },
-  { id: 'pixel-pigeon', name: 'Pixel Pigeon', ticker: 'PIGEON', description: 'the bird that always finds alpha.', progress: 27, marketCap: 26800, change: 5.6, price: 0.00268, holders: 243, volume: 3600, liquidity: 8900, creator: '0xe8…ec7f55', status: 'active', visual: 'pigeon', created: '3h ago', createdMinutes: 180 },
-]
+const GRADUATION_TARGET = 182400
+const TOKEN_SUPPLY = 1_000_000_000
+
+const visualVariants = ['cat', 'ghost', 'toad', 'baby', 'night', 'pigeon']
+
+function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
+  const nativeReserve = Number(launch.nativeReserve) / 1e18
+  const marketCap = nativeReserve + (Number(launch.virtualNativeReserve) / 1e18 - nativeReserve)
+  const price = marketCap / TOKEN_SUPPLY
+  const progress = Math.min((nativeReserve / GRADUATION_TARGET) * 100, 100)
+  const status: MigrationStatus = launch.graduated ? 'migrated' : progress >= 90 ? 'graduating' : 'active'
+  const createdMinutes = Math.max(1, Math.round((Date.now() / 1000 - Number(launch.createdAt)) / 60))
+  const createdLabel = createdMinutes < 60 ? `${createdMinutes}m ago` : createdMinutes < 1440 ? `${Math.floor(createdMinutes / 60)}h ago` : 'yesterday'
+  return {
+    id: launch.token,
+    launchId: index,
+    tokenAddress: launch.token,
+    name: launch.name,
+    ticker: launch.symbol,
+    description: launch.description,
+    progress,
+    marketCap,
+    change: 0,
+    price,
+    holders: 0,
+    volume: 0,
+    liquidity: nativeReserve,
+    creator: launch.creator,
+    status,
+    visual: visualVariants[index % visualVariants.length],
+    created: createdLabel,
+    createdMinutes,
+  }
+}
+
+function useOnChainTokens() {
+  const [tokens, setTokens] = useState<Token[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = async () => {
+    try {
+      setLoading(true)
+      setError(null)
+      const launches = await readLaunchesDirect()
+      setTokens(launches.map(mapLaunchToToken))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load on-chain launches.')
+      setTokens([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void refresh() }, [])
+  return { tokens, loading, error, refresh }
+}
 
 const navItems = [{ label: 'Explore', to: '/' }, { label: 'Create', to: '/create' }]
 
@@ -187,13 +236,16 @@ function LaunchCard({ token }: { token: Token }) {
   return <Link to={`/token/${token.id}`} className={`launch-card card-${token.visual}`}><div className="launch-card-top"><div className="launch-card-identity"><TokenMark variant={token.visual} large /><div><div className="launch-card-name"><h3>{token.name}</h3><span>${token.ticker}</span></div><p>{token.description}</p><div className="launch-card-creator">created by <b>{token.creator}</b></div></div></div><strong className={`launch-change ${token.change < 0 ? 'negative' : 'positive'}`}>{token.change > 0 ? '+' : ''}{token.change}%</strong></div><div className="launch-chart-row"><MarketChart token={token} /><div className="launch-card-stats"><span><small>MARKET CAP</small><b>${(token.marketCap / 1000).toFixed(token.marketCap < 10000 ? 2 : 1)}K</b></span><span><small>VOLUME 24H</small><b>${(token.volume / 1000).toFixed(1)}K</b></span><span><small>HOLDERS</small><b><Users size={12} /> {token.holders}</b></span></div></div><div className="migration-progress"><div className="migration-progress-head"><span><TrendingUp size={13} /> {isMigrated ? 'Graduated & migrated' : token.status === 'graduating' ? 'Near graduation' : 'Bonding curve progress'}</span><b>{token.progress.toFixed(3)}%</b></div><div className={`migration-track ${isMigrated ? 'complete' : ''}`}><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="migration-foot"><span>{isMigrated ? 'Liquidity migrated to market' : `${(100 - token.progress).toFixed(1)}% until migration`}</span><small>{token.created}</small></div></div></Link>
 }
 
-function Explore({ onConnect, wallet, isConnecting }: { onConnect: () => void; wallet: WalletState; isConnecting: boolean }) {
+function Explore({ onConnect, wallet, isConnecting, tokens, tokensLoading, tokensError, onRefresh }: { onConnect: () => void; wallet: WalletState; isConnecting: boolean; tokens: Token[]; tokensLoading: boolean; tokensError: string | null; onRefresh: () => void }) {
   const [filter, setFilter] = useState('Trending')
   const [statusFilter, setStatusFilter] = useState<MigrationStatus | 'all'>('all')
   const [search, setSearch] = useState('')
-  const filteredTokens = useMemo(() => tokens.filter((token) => (statusFilter === 'all' || token.status === statusFilter) && `${token.name} ${token.ticker}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => filter === 'New launches' ? a.createdMinutes - b.createdMinutes : filter === 'Graduating' ? b.progress - a.progress : b.change - a.change), [filter, search, statusFilter])
-  const trending = [...tokens].sort((a, b) => b.change - a.change).slice(0, 3)
-  return <main className="home-shell"><section className="home-hero container"><div className="home-hero-copy"><div className="eyebrow"><span className="pulse" /> ARC / USDC launchpad</div><h1>Launch early.<br /><span>Trade loud.</span></h1><p>A live board for the tokens forming conviction on Arc. Find the newest launches, watch the curve fill, and move before the crowd.</p><div className="hero-actions"><Link className="button primary" to="/create">Create launch <ArrowUpRight size={16} /></Link><a className="text-link" href="#explore">View new launches <span>↓</span></a></div><div className="home-stats"><span><b>06</b> tracked launches</span><span><b>01%</b> platform fee</span><span><b>ARC</b> testnet live</span></div></div><div className="signal-panel"><div className="signal-panel-top"><span><span className="pulse" /> Featured curve</span><span>01 / 03</span></div><div className="signal-token"><TokenMark variant={trending[0].visual} large /><div><span className="signal-kicker">Moving now</span><h2>{trending[0].name}</h2><strong>${trending[0].ticker}</strong></div><b className="positive">+{trending[0].change}%</b></div><div className="signal-chart"><TradingViewMarketChart token={trending[0]} large /></div><div className="signal-metrics"><span><small>PRICE</small>${trending[0].price.toFixed(5)}</span><span><small>MARKET CAP</small>${(trending[0].marketCap / 1000).toFixed(1)}K</span><span><small>CURVE</small>{trending[0].progress}%</span></div><Link className="signal-link" to={`/token/${trending[0].id}`}>Open terminal <ArrowUpRight size={15} /></Link></div></section><LiveTape /><section id="explore" className="launch-board container"><div className="board-heading"><div><div className="eyebrow">Launch terminal</div><h2>Find your next <span>runner.</span></h2><p>Fresh launches and curves in motion, sorted for fast decisions.</p></div><div className="board-count"><strong>{filteredTokens.length}</strong><span>visible launches</span></div></div><div className="board-controls"><div className="filters">{['Trending', 'New launches', 'Graduating'].map((item) => <button key={item} className={filter === item ? 'filter active' : 'filter'} onClick={() => setFilter(item)}>{item}</button>)}</div><div className="search-box"><Search size={16} /><input aria-label="Search tokens" placeholder="Search ticker or launch" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div><div className="launch-discovery-bar"><div className="launch-status-tabs">{([{ value: 'all', label: 'All tokens' }, { value: 'active', label: 'Bonding' }, { value: 'graduating', label: 'Near graduation' }, { value: 'migrated', label: 'Migrated' }] as const).map((item) => <button key={item.value} className={statusFilter === item.value ? 'active' : ''} onClick={() => setStatusFilter(item.value)}>{item.label}</button>)}</div><div className="launch-toolbar-actions"><span><Flame size={14} /> Live board</span><button aria-label="Grid view" className="view-toggle active"><Grid2X2 size={15} /></button><button aria-label="Filter options" className="view-toggle"><ListFilter size={15} /></button></div></div><div className="launch-grid">{filteredTokens.map((token) => <LaunchCard key={token.id} token={token} />)}</div></section><MobileNav onConnect={onConnect} wallet={wallet} isConnecting={isConnecting} /></main>
+  const filteredTokens = useMemo(() => tokens.filter((token) => (statusFilter === 'all' || token.status === statusFilter) && `${token.name} ${token.ticker}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => filter === 'New launches' ? a.createdMinutes - b.createdMinutes : filter === 'Graduating' ? b.progress - a.progress : b.change - a.change), [filter, search, statusFilter, tokens])
+  const trending = [...tokens].sort((a, b) => b.progress - a.progress).slice(0, 3)
+  if (tokensLoading) return <main className="home-shell"><div className="container" style={{ padding: '120px 32px', textAlign: 'center' }}><div className="eyebrow"><span className="pulse" /> Loading on-chain data</div><h2 style={{ marginTop: 16 }}>Reading launches from Arc testnet…</h2></div></main>
+  if (tokensError) return <main className="home-shell"><div className="container" style={{ padding: '120px 32px', textAlign: 'center' }}><div className="eyebrow" style={{ color: 'var(--market-negative)' }}>Connection error</div><h2 style={{ marginTop: 16 }}>{tokensError}</h2><button className="button primary" onClick={onRefresh} style={{ marginTop: 20 }}>Retry</button></div></main>
+  if (tokens.length === 0) return <main className="home-shell"><div className="container" style={{ padding: '120px 32px', textAlign: 'center' }}><div className="eyebrow"><span className="pulse" /> No launches yet</div><h2 style={{ marginTop: 16 }}>No tokens have been launched on this contract yet.</h2><Link className="button primary" to="/create" style={{ marginTop: 20 }}>Create the first launch <ArrowUpRight size={16} /></Link></div></main>
+  return <main className="home-shell"><section className="home-hero container"><div className="home-hero-copy"><div className="eyebrow"><span className="pulse" /> ARC / USDC launchpad</div><h1>Launch early.<br /><span>Trade loud.</span></h1><p>A live board for the tokens forming conviction on Arc. Find the newest launches, watch the curve fill, and move before the crowd.</p><div className="hero-actions"><Link className="button primary" to="/create">Create launch <ArrowUpRight size={16} /></Link><a className="text-link" href="#explore">View new launches <span>↓</span></a></div><div className="home-stats"><span><b>{String(tokens.length).padStart(2, '0')}</b> tracked launches</span><span><b>01%</b> platform fee</span><span><b>ARC</b> testnet live</span></div></div><div className="signal-panel"><div className="signal-panel-top"><span><span className="pulse" /> Featured curve</span><span>{String(Math.min(trending.length, 3)).padStart(2, '0')} / 03</span></div><div className="signal-token"><TokenMark variant={trending[0].visual} large /><div><span className="signal-kicker">Moving now</span><h2>{trending[0].name}</h2><strong>${trending[0].ticker}</strong></div><b className="positive">{trending[0].progress.toFixed(1)}%</b></div><div className="signal-chart"><TradingViewMarketChart token={trending[0]} large /></div><div className="signal-metrics"><span><small>PRICE</small>${trending[0].price.toFixed(5)}</span><span><small>MARKET CAP</small>${(trending[0].marketCap / 1000).toFixed(1)}K</span><span><small>CURVE</small>{trending[0].progress.toFixed(1)}%</span></div><Link className="signal-link" to={`/token/${trending[0].id}`}>Open terminal <ArrowUpRight size={15} /></Link></div></section><LiveTape /><section id="explore" className="launch-board container"><div className="board-heading"><div><div className="eyebrow">Launch terminal</div><h2>Find your next <span>runner.</span></h2><p>Fresh launches and curves in motion, sorted for fast decisions.</p></div><div className="board-count"><strong>{filteredTokens.length}</strong><span>visible launches</span></div></div><div className="board-controls"><div className="filters">{['Trending', 'New launches', 'Graduating'].map((item) => <button key={item} className={filter === item ? 'filter active' : 'filter'} onClick={() => setFilter(item)}>{item}</button>)}</div><div className="search-box"><Search size={16} /><input aria-label="Search tokens" placeholder="Search ticker or launch" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div><div className="launch-discovery-bar"><div className="launch-status-tabs">{([{ value: 'all', label: 'All tokens' }, { value: 'active', label: 'Bonding' }, { value: 'graduating', label: 'Near graduation' }, { value: 'migrated', label: 'Migrated' }] as const).map((item) => <button key={item.value} className={statusFilter === item.value ? 'active' : ''} onClick={() => setStatusFilter(item.value)}>{item.label}</button>)}</div><div className="launch-toolbar-actions"><button onClick={onRefresh} style={{ background: 'transparent', border: '1px solid #2c4333', color: '#70dc8b', borderRadius: 8, padding: '6px 10px', font: '10px DM Mono', cursor: 'pointer' }}>Refresh</button><span><Flame size={14} /> Live board</span><button aria-label="Grid view" className="view-toggle active"><Grid2X2 size={15} /></button><button aria-label="Filter options" className="view-toggle"><ListFilter size={15} /></button></div></div><div className="launch-grid">{filteredTokens.map((token) => <LaunchCard key={token.id} token={token} />)}</div></section><MobileNav onConnect={onConnect} wallet={wallet} isConnecting={isConnecting} /></main>
 }
 
 function MobileNav({ onConnect, wallet, isConnecting }: { onConnect: () => void; wallet: WalletState; isConnecting: boolean }) {
@@ -307,7 +359,7 @@ function TradePanel({ token, onConnect, connected }: { token: Token; onConnect: 
   return <div className="trade-panel"><div className="trade-tabs"><button className={side === 'Buy' ? 'active' : ''} onClick={() => setSide('Buy')}>Buy</button><button className={side === 'Sell' ? 'active sell' : ''} onClick={() => setSide('Sell')}>Sell</button></div><div className="trade-body"><div className="trade-label"><span>You pay</span><button>{payingSymbol} <ChevronDown size={13} /></button></div><div className="amount-field"><input value={amount} onChange={(event) => setAmount(event.target.value.replace(/[^0-9.]/g, ''))} placeholder="0.00" inputMode="decimal" /><span>{payingSymbol}</span></div><div className="quick-amounts"><button onClick={() => setAmount('10')}>10</button><button onClick={() => setAmount('50')}>50</button><button onClick={() => setAmount('100')}>100</button><button onClick={() => setAmount('500')}>500</button></div><div className="trade-label second"><span>You receive</span><span className="muted">Estimated</span></div><div className="receive-field"><strong>{value ? receivedValue.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '0.00'}</strong><span>{receivingSymbol}</span></div><div className="trade-summary"><span>Price impact <b>0.12%</b></span><span>Network fee <b>~$0.01</b></span></div><button className="button primary trade-button" onClick={() => { if (!connected) onConnect(); else setSubmitted(true) }} disabled={submitted}>{submitted ? <><Sparkles size={15} /> Preview order submitted</> : <><Wallet size={15} /> {connected ? `${side} ${token.ticker}` : `Connect wallet to ${side.toLowerCase()}`}</>}</button><span className="trade-mock">{submitted ? 'Demo state complete / no transaction was sent' : 'UI preview only / no transaction will be sent'}</span></div></div>
 }
 
-function Detail({ onConnect, wallet }: { onConnect: () => void; wallet: WalletState }) {
+function Detail({ onConnect, wallet, tokens }: { onConnect: () => void; wallet: WalletState; tokens: Token[] }) {
   const { id } = useParams()
   const token = tokens.find((item) => item.id === id) || tokens[0]
   const [copied, setCopied] = useState(false)
@@ -320,9 +372,166 @@ function MigrationCard({ status }: { status: MigrationStatus }) {
   return <div className={`migration-card ${migrated ? 'migrated' : ''}`}><div className="migration-icon">{migrated ? '✓' : <Zap size={20} />}</div><div><div className="eyebrow">{migrated ? 'Migration complete' : 'The roadmap'}</div><h3>{migrated ? 'Now trading on ARC mainnet' : status === 'graduating' ? 'Almost ready for the next stop' : 'Build toward the big move'}</h3><p>{migrated ? 'This token graduated from its bonding curve and is now available on the open market.' : 'At 100%, liquidity migrates to Uniswap on ARC Mainnet. This is a preview of what comes next.'}</p></div></div>
 }
 
+const ADMIN_KEY_STORAGE = 'doxa_admin_pk'
+
+function AdminPanel({ onRefreshTokens }: { onRefreshTokens: () => void }) {
+  const [privateKey, setPrivateKey] = useState('')
+  const [unlocked, setUnlocked] = useState(false)
+  const [botAddress, setBotAddress] = useState('')
+  const [botBalance, setBotBalance] = useState('')
+  const [name, setName] = useState('')
+  const [ticker, setTicker] = useState('')
+  const [description, setDescription] = useState('')
+  const [createHash, setCreateHash] = useState<string | null>(null)
+  const [createError, setCreateError] = useState<string | null>(null)
+  const [isCreating, setIsCreating] = useState(false)
+  const [buyLaunchId, setBuyLaunchId] = useState('')
+  const [buyAmount, setBuyAmount] = useState('')
+  const [buyHash, setBuyHash] = useState<string | null>(null)
+  const [buyError, setBuyError] = useState<string | null>(null)
+  const [isBuying, setIsBuying] = useState(false)
+
+  const loadStoredKey = () => {
+    const stored = localStorage.getItem(ADMIN_KEY_STORAGE)
+    if (stored) {
+      setPrivateKey(stored)
+      return stored
+    }
+    return null
+  }
+
+  useEffect(() => {
+    const stored = loadStoredKey()
+    if (stored) {
+      try {
+        const addr = getAccountFromPrivateKey(stored)
+        setBotAddress(addr)
+        setUnlocked(true)
+        void readNativeBalanceDirect(addr).then(setBotBalance)
+      } catch { /* invalid key */ }
+    }
+  }, [])
+
+  const handleUnlock = () => {
+    if (!privateKey.trim()) return
+    try {
+      const addr = getAccountFromPrivateKey(privateKey.trim())
+      setBotAddress(addr)
+      setUnlocked(true)
+      localStorage.setItem(ADMIN_KEY_STORAGE, privateKey.trim())
+      void readNativeBalanceDirect(addr).then(setBotBalance)
+    } catch {
+      setCreateError('Invalid private key format.')
+    }
+  }
+
+  const handleLock = () => {
+    localStorage.removeItem(ADMIN_KEY_STORAGE)
+    setPrivateKey('')
+    setUnlocked(false)
+    setBotAddress('')
+    setBotBalance('')
+  }
+
+  const handleCreate = async () => {
+    setCreateError(null)
+    setCreateHash(null)
+    if (!name.trim() || !ticker.trim() || !description.trim()) {
+      setCreateError('Name, ticker, and description are required.')
+      return
+    }
+    setIsCreating(true)
+    try {
+      const hash = await createLaunchWithPrivateKey(privateKey.trim(), name.trim(), ticker.trim(), description.trim())
+      setCreateHash(hash)
+      void onRefreshTokens()
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : 'Failed to create token.')
+    } finally {
+      setIsCreating(false)
+    }
+  }
+
+  const handleBuy = async () => {
+    setBuyError(null)
+    setBuyHash(null)
+    const launchId = Number(buyLaunchId)
+    const amount = Number(buyAmount)
+    if (!Number.isFinite(launchId) || launchId < 0) {
+      setBuyError('Valid launch ID is required.')
+      return
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setBuyError('Valid USDC amount is required.')
+      return
+    }
+    setIsBuying(true)
+    try {
+      const nativeIn = BigInt(Math.round(amount * 1e18))
+      const hash = await buyWithPrivateKey(privateKey.trim(), launchId, nativeIn)
+      setBuyHash(hash)
+      void onRefreshTokens()
+      void readNativeBalanceDirect(botAddress).then(setBotBalance)
+    } catch (err) {
+      setBuyError(err instanceof Error ? err.message : 'Failed to buy token.')
+    } finally {
+      setIsBuying(false)
+    }
+  }
+
+  if (!unlocked) {
+    return <main className="container page" style={{ paddingTop: 80, maxWidth: 460 }}>
+      <div className="eyebrow" style={{ color: 'var(--market-warning)' }}>Admin / Bot control</div>
+      <h1 style={{ fontSize: 28, marginTop: 8 }}>Unlock admin panel</h1>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginTop: 8 }}>Enter the bot wallet private key. It is stored in your browser's localStorage and never sent to any server.</p>
+      <input type="password" value={privateKey} onChange={(e) => setPrivateKey(e.target.value)} placeholder="0x... private key" style={{ width: '100%', padding: '12px 14px', background: '#0b100d', border: '1px solid #28382f', borderRadius: 10, color: '#f1f6f3', fontFamily: 'DM Mono, monospace', fontSize: 13, marginTop: 16 }} />
+      <button className="button primary" onClick={handleUnlock} style={{ marginTop: 14, width: '100%' }}>Unlock</button>
+      {createError && <p className="form-error" role="alert" style={{ marginTop: 12 }}>{createError}</p>}
+    </main>
+  }
+
+  return <main className="container page" style={{ paddingTop: 60, maxWidth: 580 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+      <div>
+        <div className="eyebrow" style={{ color: 'var(--market-warning)' }}>Admin / Bot control</div>
+        <h1 style={{ fontSize: 26, marginTop: 8 }}>Bot dashboard</h1>
+      </div>
+      <button onClick={handleLock} style={{ background: 'transparent', border: '1px solid #28382f', color: 'var(--muted)', borderRadius: 8, padding: '8px 14px', font: '11px DM Mono', cursor: 'pointer' }}>Lock & clear key</button>
+    </div>
+    <div style={{ display: 'flex', gap: 16, marginBottom: 28, flexWrap: 'wrap' }}>
+      <div style={{ flex: '1 1 200px', padding: '16px 18px', background: '#0b100d', border: '1px solid #28382f', borderRadius: 12 }}>
+        <small style={{ color: 'var(--muted)', font: '10px DM Mono', letterSpacing: '.04em' }}>BOT ADDRESS</small>
+        <div style={{ font: '12px DM Mono', marginTop: 6, wordBreak: 'break-all' }}>{botAddress}</div>
+      </div>
+      <div style={{ flex: '1 1 120px', padding: '16px 18px', background: '#0b100d', border: '1px solid #28382f', borderRadius: 12 }}>
+        <small style={{ color: 'var(--muted)', font: '10px DM Mono', letterSpacing: '.04em' }}>USDC BALANCE</small>
+        <div style={{ font: '14px DM Mono', marginTop: 6, color: 'var(--market-positive)' }}>{botBalance || '—'}</div>
+      </div>
+    </div>
+    <div style={{ padding: '22px 24px', background: '#0b100d', border: '1px solid #28382f', borderRadius: 14, marginBottom: 20 }}>
+      <h2 style={{ fontSize: 16, marginBottom: 16 }}>Create token</h2>
+      <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>NAME</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Token name" maxLength={28} style={{ width: '100%', padding: '10px 12px', background: '#050706', border: '1px solid #28382f', borderRadius: 8, color: '#f1f6f3', fontFamily: 'DM Mono, monospace', fontSize: 13, marginTop: 4 }} /></label>
+      <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>TICKER</span><input value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))} placeholder="TICKER" maxLength={8} style={{ width: '100%', padding: '10px 12px', background: '#050706', border: '1px solid #28382f', borderRadius: 8, color: '#f1f6f3', fontFamily: 'DM Mono, monospace', fontSize: 13, marginTop: 4 }} /></label>
+      <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>DESCRIPTION</span><input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" maxLength={120} style={{ width: '100%', padding: '10px 12px', background: '#050706', border: '1px solid #28382f', borderRadius: 8, color: '#f1f6f3', fontFamily: 'DM Mono, monospace', fontSize: 13, marginTop: 4 }} /></label>
+      <button className="button primary" onClick={handleCreate} disabled={isCreating} style={{ marginTop: 4 }}>{isCreating ? 'Sending...' : 'Create token'}</button>
+      {createHash && <p className="form-success" style={{ marginTop: 10 }}>TX: <a href={`${ARC_TESTNET.explorerUrl}/tx/${createHash}`} target="_blank" rel="noreferrer">{formatWalletAddress(createHash)}</a></p>}
+      {createError && <p className="form-error" role="alert" style={{ marginTop: 10 }}>{createError}</p>}
+    </div>
+    <div style={{ padding: '22px 24px', background: '#0b100d', border: '1px solid #28382f', borderRadius: 14 }}>
+      <h2 style={{ fontSize: 16, marginBottom: 16 }}>Buy token</h2>
+      <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>LAUNCH ID</span><input value={buyLaunchId} onChange={(e) => setBuyLaunchId(e.target.value.replace(/[^0-9]/g, ''))} placeholder="0" inputMode="numeric" style={{ width: '100%', padding: '10px 12px', background: '#050706', border: '1px solid #28382f', borderRadius: 8, color: '#f1f6f3', fontFamily: 'DM Mono, monospace', fontSize: 13, marginTop: 4 }} /></label>
+      <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>USDC AMOUNT</span><input value={buyAmount} onChange={(e) => setBuyAmount(e.target.value.replace(/[^0-9.]/g, ''))} placeholder="10.0" inputMode="decimal" style={{ width: '100%', padding: '10px 12px', background: '#050706', border: '1px solid #28382f', borderRadius: 8, color: '#f1f6f3', fontFamily: 'DM Mono, monospace', fontSize: 13, marginTop: 4 }} /></label>
+      <button className="button primary" onClick={handleBuy} disabled={isBuying} style={{ marginTop: 4 }}>{isBuying ? 'Sending...' : 'Buy with bot wallet'}</button>
+      {buyHash && <p className="form-success" style={{ marginTop: 10 }}>TX: <a href={`${ARC_TESTNET.explorerUrl}/tx/${buyHash}`} target="_blank" rel="noreferrer">{formatWalletAddress(buyHash)}</a></p>}
+      {buyError && <p className="form-error" role="alert" style={{ marginTop: 10 }}>{buyError}</p>}
+    </div>
+  </main>
+}
+
 function App() {
   const { wallet, connect, isConnecting } = useArcWallet()
-  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore onConnect={connect} wallet={wallet} isConnecting={isConnecting} />} /><Route path="/create" element={<Create wallet={wallet} onConnect={connect} />} /><Route path="/wallet" element={<WalletDashboard wallet={wallet} onConnect={connect} isConnecting={isConnecting} />} /><Route path="/token/:id" element={<Detail onConnect={connect} wallet={wallet} />} /></Routes><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right">DOXA.xyz / 2026</span></div></footer></>
+  const { tokens, loading: tokensLoading, error: tokensError, refresh: refreshTokens } = useOnChainTokens()
+  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore onConnect={connect} wallet={wallet} isConnecting={isConnecting} tokens={tokens} tokensLoading={tokensLoading} tokensError={tokensError} onRefresh={refreshTokens} />} /><Route path="/create" element={<Create wallet={wallet} onConnect={connect} />} /><Route path="/wallet" element={<WalletDashboard wallet={wallet} onConnect={connect} isConnecting={isConnecting} />} /><Route path="/token/:id" element={<Detail onConnect={connect} wallet={wallet} tokens={tokens} />} /><Route path="/admin" element={<AdminPanel onRefreshTokens={refreshTokens} />} /></Routes><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right">DOXA.xyz / 2026</span></div></footer></>
 }
 
 export default App
