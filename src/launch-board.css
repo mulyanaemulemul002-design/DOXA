@@ -92,7 +92,7 @@
 .signal-chart .market-chart{background:linear-gradient(180deg,rgba(70,216,137,.11),transparent 82%)}
 .signal-chart .market-chart-grid{background:repeating-linear-gradient(to bottom,transparent 0,transparent 35px,var(--market-grid) 36px);opacity:.48}
 .chart-labels{color:#72867a;letter-spacing:.04em}
-.market-chart-toolbar{position:absolute;z-index:2;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;pointer-events:none}
+.market-chart-shell{position:relative;height:100%}.market-chart-toolbar{position:absolute;z-index:2;top:8px;left:8px;right:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;pointer-events:none}.tradingview-chart{position:absolute;inset:0;padding-top:28px}.tradingview-chart canvas{display:block}.candles-active{background:linear-gradient(180deg,rgba(9,16,12,.88),rgba(5,9,7,.96));border-bottom-color:var(--market-grid)}
 .chart-mode-toggle,.chart-metric-toggle{display:flex;gap:2px;padding:2px;border:1px solid var(--market-grid);background:rgba(5,10,7,.82);pointer-events:auto}
 .chart-mode-toggle button,.chart-metric-toggle button{border:0;background:transparent;color:#72867a;font:8px 'DM Mono';letter-spacing:.04em;padding:4px 6px;cursor:pointer}
 .chart-mode-toggle button.active,.chart-metric-toggle button.active{background:#193525;color:#d9f5e4}
