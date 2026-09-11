@@ -2,20 +2,22 @@ import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState 
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ArrowUpRight, ChevronDown, CircleHelp, Copy, Flame, Grid2X2, ImagePlus, ListFilter, Menu, Search, Sparkles, TrendingUp, Users, Wallet, X, Zap } from 'lucide-react'
 import { CandlestickSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
-import { ARC_TESTNET, connectArcWallet, formatWalletAddress, getInjectedProvider, getAccountFromPrivateKey, launchTokenOnArc, readArcLaunches, readArcWalletBalances, readTokenBalance, readLaunchesDirect, readNativeBalanceDirect, createLaunchWithPrivateKey, buyWithPrivateKey, type ArcLaunch, type ArcWalletBalances } from './lib/arc'
+import { ARC_TESTNET, connectArcWallet, formatWalletAddress, getInjectedProvider, getAccountFromPrivateKey, launchTokenOnArc, readArcWalletBalances, readLaunchesDirect, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, type ArcLaunch, type ArcWalletBalances } from './lib/arc'
 
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
-type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number }
+type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number; priceSeries: number[] }
 
-const GRADUATION_TARGET = 182400
+const GRADUATION_TARGET = 10000
 const TOKEN_SUPPLY = 1_000_000_000
 
 const visualVariants = ['cat', 'ghost', 'toad', 'baby', 'night', 'pigeon']
 
 function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
   const nativeReserve = Number(launch.nativeReserve) / 1e18
-  const marketCap = nativeReserve + (Number(launch.virtualNativeReserve) / 1e18 - nativeReserve)
-  const price = marketCap / TOKEN_SUPPLY
+  const spotPrice = Number(launch.virtualTokenReserve) > 0 ? Number(launch.virtualNativeReserve) / Number(launch.virtualTokenReserve) : 0
+  const marketCap = spotPrice * TOKEN_SUPPLY
+  const priceSeries = buildCurvePriceSeries(launch)
+  const change = priceSeries.length > 1 && priceSeries[0] > 0 ? ((priceSeries[priceSeries.length - 1] - priceSeries[0]) / priceSeries[0]) * 100 : 0
   const progress = Math.min((nativeReserve / GRADUATION_TARGET) * 100, 100)
   const status: MigrationStatus = launch.graduated ? 'migrated' : progress >= 90 ? 'graduating' : 'active'
   const createdMinutes = Math.max(1, Math.round((Date.now() / 1000 - Number(launch.createdAt)) / 60))
@@ -29,8 +31,8 @@ function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
     description: launch.description,
     progress,
     marketCap,
-    change: 0,
-    price,
+    change,
+    price: spotPrice,
     holders: 0,
     volume: 0,
     liquidity: nativeReserve,
@@ -39,6 +41,7 @@ function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
     visual: visualVariants[index % visualVariants.length],
     created: createdLabel,
     createdMinutes,
+    priceSeries,
   }
 }
 
@@ -47,21 +50,25 @@ function useOnChainTokens() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const refresh = async () => {
+  const refresh = async (silent = false) => {
     try {
-      setLoading(true)
+      if (!silent) setLoading(true)
       setError(null)
       const launches = await readLaunchesDirect()
       setTokens(launches.map(mapLaunchToToken))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load on-chain launches.')
-      setTokens([])
+      if (!silent) setTokens([])
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }
 
-  useEffect(() => { void refresh() }, [])
+  useEffect(() => {
+    void refresh()
+    const interval = window.setInterval(() => { void refresh(true) }, 20000)
+    return () => window.clearInterval(interval)
+  }, [])
   return { tokens, loading, error, refresh }
 }
 
@@ -157,25 +164,19 @@ function StatusBadge({ status }: { status: MigrationStatus }) {
   return <span className={`status-badge ${status}`}><span /> {labels[status]}</span>
 }
 
-const chartPaths = {
-  'keyboard-cat': 'M0 78 C18 72 22 56 38 63 S56 71 67 40 S84 47 96 28 S108 22 120 10',
-  'arcade-ghost': 'M0 64 C13 58 17 67 28 52 S42 22 54 38 S68 54 78 34 S92 39 101 21 S111 26 120 12',
-  'toad-frog': 'M0 24 C13 36 18 21 31 42 S48 34 60 57 S76 41 87 62 S102 55 120 74',
-  'usdc-baby': 'M0 69 C15 65 20 52 34 60 S48 46 58 52 S74 37 87 43 S102 24 120 18',
-  'night-shift': 'M0 74 C14 73 19 42 32 51 S47 55 58 29 S72 34 80 18 S96 25 104 8 S113 11 120 3',
-  'pixel-pigeon': 'M0 68 C13 61 23 70 32 54 S46 39 57 49 S73 43 83 28 S99 35 108 20 S116 18 120 12',
-}
-
 type ChartMode = 'trend' | 'candle'
 type ChartMetric = 'price' | 'marketCap'
 
-const candleSeries: Record<string, Array<[number, number, number, number, number]>> = {
-  'keyboard-cat': [[12, 38, 31, 46, 28], [30, 45, 34, 53, 42], [48, 50, 40, 59, 48], [66, 58, 48, 70, 55], [84, 69, 57, 80, 64], [102, 77, 66, 89, 73]],
-  'arcade-ghost': [[12, 30, 22, 42, 28], [30, 40, 27, 51, 36], [48, 44, 33, 58, 40], [66, 55, 38, 66, 52], [84, 63, 49, 75, 58], [102, 74, 57, 86, 69]],
-  'toad-frog': [[12, 24, 18, 38, 30], [30, 32, 24, 46, 38], [48, 40, 31, 55, 43], [66, 52, 39, 66, 54], [84, 60, 47, 74, 63], [102, 70, 58, 84, 72]],
-  'usdc-baby': [[12, 68, 58, 76, 64], [30, 63, 52, 71, 59], [48, 57, 45, 66, 53], [66, 51, 39, 60, 46], [84, 43, 32, 54, 38], [102, 34, 22, 46, 29]],
-  'night-shift': [[12, 38, 28, 50, 34], [30, 48, 35, 60, 44], [48, 55, 43, 66, 51], [66, 64, 50, 75, 59], [84, 73, 59, 84, 68], [102, 82, 68, 92, 77]],
-  'pixel-pigeon': [[12, 32, 24, 44, 29], [30, 42, 30, 53, 38], [48, 49, 37, 61, 45], [66, 58, 45, 69, 54], [84, 66, 53, 77, 61], [102, 75, 62, 86, 70]],
+function seriesToSvgPath(series: number[]): string {
+  if (series.length < 2) return 'M0 50 L120 50'
+  const min = Math.min(...series)
+  const max = Math.max(...series)
+  const range = max - min || 1
+  return series.map((value, index) => {
+    const x = (index / (series.length - 1)) * 120
+    const y = 95 - ((value - min) / range) * 85
+    return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)}`
+  }).join(' ')
 }
 
 function TradingViewMarketChart({ token, large = false }: { token: Token; large?: boolean }) {
@@ -194,30 +195,47 @@ function TradingViewMarketChart({ token, large = false }: { token: Token; large?
       timeScale: { borderColor: 'rgba(120, 150, 130, .22)', timeVisible: true, secondsVisible: false, rightOffset: 2 },
       crosshair: { vertLine: { color: 'rgba(190, 255, 215, .45)', width: 1, style: 2 }, horzLine: { color: 'rgba(190, 255, 215, .45)', width: 1, style: 2 } },
     })
-    const candles = candleSeries[token.id] || candleSeries['keyboard-cat']
-    const base = metric === 'price' ? token.price : token.marketCap
+    const source = token.priceSeries.length > 1 ? token.priceSeries : [token.price || 0, token.price || 0]
+    const scale = metric === 'price' ? 1 : TOKEN_SUPPLY
+    const bucketCount = Math.min(14, source.length)
+    const bucketSize = Math.max(1, Math.floor(source.length / bucketCount))
+    const totalBuckets = Math.ceil(source.length / bucketSize)
+    const nowSec = Math.floor(Date.now() / 1000)
+    const startSec = nowSec - token.createdMinutes * 60
+    const step = Math.max(60, Math.floor((nowSec - startSec) / Math.max(1, totalBuckets)))
+    const candleData: Array<{ time: Time; open: number; high: number; low: number; close: number }> = []
+    let bucketIndex = 0
+    for (let i = 0; i < source.length; i += bucketSize) {
+      const window = source.slice(i, i + bucketSize)
+      if (window.length === 0) continue
+      candleData.push({
+        time: (startSec + bucketIndex * step) as Time,
+        open: window[0] * scale,
+        high: Math.max(...window) * scale,
+        low: Math.min(...window) * scale,
+        close: window[window.length - 1] * scale,
+      })
+      bucketIndex++
+    }
     const series: ISeriesApi<'Candlestick'> = chart.addSeries(CandlestickSeries, {
       upColor: '#46d889', downColor: '#e07f76', borderVisible: false, wickUpColor: '#46d889', wickDownColor: '#e07f76',
-      priceFormat: { type: 'price', precision: metric === 'price' ? 6 : 0, minMove: metric === 'price' ? .000001 : 1 },
+      priceFormat: { type: 'price', precision: metric === 'price' ? 9 : 2, minMove: metric === 'price' ? 1e-9 : 0.01 },
     })
-    series.setData(candles.map(([time, open, high, low, close], index) => {
-      const scale = base / 72
-      const offset = index * scale * .018
-      return { time: (1710000000 + time * 3600) as Time, open: base + (100 - open) * scale + offset, high: base + (100 - high) * scale + offset, low: base + (100 - low) * scale + offset, close: base + (100 - close) * scale + offset }
-    }))
+    series.setData(candleData)
     chart.timeScale().fitContent()
     return () => chart.remove()
-  }, [large, mode, metric, token.id, token.marketCap, token.price])
+  }, [large, mode, metric, token.id, token.priceSeries, token.price, token.createdMinutes])
 
   const toolbar = large && <div className="market-chart-toolbar"><div className="chart-mode-toggle" role="group" aria-label="Chart type"><button className={mode === 'trend' ? 'active' : ''} onClick={() => setMode('trend')} type="button">Trend</button><button className={mode === 'candle' ? 'active' : ''} onClick={() => setMode('candle')} type="button">Candles</button></div><div className="chart-metric-toggle" role="group" aria-label="Chart metric"><button className={metric === 'price' ? 'active' : ''} onClick={() => setMetric('price')} type="button">Price</button><button className={metric === 'marketCap' ? 'active' : ''} onClick={() => setMetric('marketCap')} type="button">Market cap</button></div></div>
-  if (mode === 'candle') return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''} candles-active`} aria-label={`${token.name} TradingView candlestick chart`}>{toolbar}<div className="tradingview-chart" ref={chartRef} /></div>
+  if (mode === 'candle') return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''} candles-active`} aria-label={`${token.name} candlestick chart`}>{toolbar}<div className="tradingview-chart" ref={chartRef} /></div>
   return <div className="market-chart-shell">{toolbar}<MarketChart token={token} large={large} metric={metric} /></div>
 }
 
 function MarketChart({ token, large = false, metric = 'price' }: { token: Token; large?: boolean; metric?: ChartMetric }) {
-  const line = chartPaths[token.id as keyof typeof chartPaths] || chartPaths['keyboard-cat']
+  const line = seriesToSvgPath(token.priceSeries)
   const area = `${line} L120 100 L0 100 Z`
-  return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''}`} aria-label={`${token.name} price trend chart`}><div className="market-chart-grid" /><svg viewBox="0 0 120 100" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id={`fill-${token.id}`} x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="currentColor" stopOpacity=".28" /><stop offset="100%" stopColor="currentColor" stopOpacity="0" /></linearGradient></defs><path className="chart-area" d={area} fill={`url(#fill-${token.id})`} /><path className="chart-line" d={line} fill="none" stroke="currentColor" strokeWidth={large ? '1.6' : '1.8'} vectorEffect="non-scaling-stroke" /></svg>{large && <div className="chart-labels"><span>1H</span><span>6H</span><span>12H</span><span>24H</span><b>{metric === 'price' ? `${token.price.toFixed(5)}` : `${(token.marketCap / 1000).toFixed(1)}K`}</b></div>}</div>
+  const fillId = `fill-${token.launchId}${large ? '-lg' : ''}`
+  return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''}`} aria-label={`${token.name} price trend chart`}><div className="market-chart-grid" /><svg viewBox="0 0 120 100" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id={fillId} x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="currentColor" stopOpacity=".28" /><stop offset="100%" stopColor="currentColor" stopOpacity="0" /></linearGradient></defs><path className="chart-area" d={area} fill={`url(#${fillId})`} /><path className="chart-line" d={line} fill="none" stroke="currentColor" strokeWidth={large ? '1.6' : '1.8'} vectorEffect="non-scaling-stroke" /></svg>{large && <div className="chart-labels"><span>Launch</span><span>25%</span><span>50%</span><span>Now</span><b>{metric === 'price' ? `${(token.price || 0).toPrecision(3)}` : `${(token.marketCap / 1000).toFixed(1)}K`}</b></div>}</div>
 }
 
 function LiveTape() {
@@ -323,11 +341,11 @@ function WalletDashboard({ wallet, onConnect, isConnecting }: { wallet: WalletSt
     let cancelled = false
     setLoading(true)
     setError(null)
-    void readArcLaunches()
+    void readLaunchesDirect()
       .then(async (allLaunches) => {
         const withBalances = await Promise.all(allLaunches.map(async (launch) => ({
           launch,
-          balance: await readTokenBalance(launch.token, wallet.account as string),
+          balance: await readTokenBalanceDirect(launch.token, wallet.account as string),
         })))
         if (!cancelled) setLaunches(withBalances.filter(({ launch, balance }) => launch.creator.toLowerCase() === wallet.account?.toLowerCase() || Number(balance) > 0))
       })
@@ -349,23 +367,99 @@ function WalletDashboard({ wallet, onConnect, isConnecting }: { wallet: WalletSt
   return <main className="container page wallet-page"><div className="wallet-heading"><div><div className="eyebrow"><span className="pulse" /> Wallet overview</div><h1>Your wallet<br /><span>at a glance.</span></h1><p>{formatWalletAddress(wallet.account)} · Arc Testnet</p></div><a className="button secondary" href={`${ARC_TESTNET.explorerUrl}/address/${wallet.account}`} target="_blank" rel="noreferrer">View on explorer <ArrowUpRight size={15} /></a></div><section className="wallet-balance-grid"><div className="balance-card balance-main"><div className="balance-card-top"><span>Total balance</span><span className="wallet-live"><span className="pulse" /> LIVE</span></div><strong>{wallet.balances?.nativeUsdc ?? '—'} <small>USDC</small></strong><p>Native USDC available for Arc Testnet gas and trading.</p><div className="balance-address">{wallet.account}</div></div><div className="balance-card"><span>ERC-20 USDC</span><strong>{wallet.balances?.erc20Usdc ?? '—'} <small>USDC</small></strong><p>Token balance detected in your connected wallet.</p></div><div className="balance-card creator-fee-card"><span>Creator fee share</span><strong>0.00 <small>USDC</small></strong><p>Not enabled in the deployed contract. Current fees route to the treasury.</p><span className="fee-status">Platform fee 1% · creator share 0%</span></div></section><section className="wallet-content"><div className="wallet-section"><div className="wallet-section-heading"><div><div className="eyebrow">Your assets</div><h2>Token holdings.</h2></div><span className="section-count">{holdings.length} assets</span></div>{loading ? <div className="wallet-placeholder">Reading token balances from Arc...</div> : holdings.length ? <div className="wallet-token-list">{holdings.map(({ launch, balance }) => <a href={`${ARC_TESTNET.explorerUrl}/address/${launch.token}`} target="_blank" rel="noreferrer" className="wallet-token-row" key={launch.token}><span className="wallet-token-mark">{launch.symbol.slice(0, 1)}</span><span><strong>{launch.name}</strong><small>${launch.symbol}</small></span><b>{balance}</b><ArrowUpRight size={15} /></a>)}</div> : <div className="wallet-placeholder">No token holdings yet. Explore a launch and make your first trade.</div>}</div><div className="wallet-section"><div className="wallet-section-heading"><div><div className="eyebrow">Creator studio</div><h2>Tokens you created.</h2></div><span className="section-count">{created.length} launches</span></div>{loading ? <div className="wallet-placeholder">Loading launches...</div> : created.length ? <div className="created-list">{created.map(({ launch }) => <div className="created-row" key={launch.token}><div><strong>{launch.name} <span>${launch.symbol}</span></strong><small>{formatArcAmount(launch.nativeReserve)} USDC raised · {launch.graduated ? 'Graduated' : 'Active curve'}</small></div><a href={`${ARC_TESTNET.explorerUrl}/address/${launch.token}`} target="_blank" rel="noreferrer">Contract <ArrowUpRight size={13} /></a></div>)}</div> : <div className="wallet-placeholder">Your on-chain launches will show here after you create one.</div>}</div></section>{error && <p className="form-error" role="alert">{error}</p>}<div className="wallet-fee-note"><Sparkles size={16} /><div><strong>Creator rewards are ready for the next contract iteration.</strong><p>The deployed launchpad currently sends the configured 1% trading fee to the treasury only. This UI keeps the creator share visible without inventing a balance that the contract cannot pay yet.</p></div></div></main>
 }
 
-function TradePanel({ token, onConnect, connected }: { token: Token; onConnect: () => void; connected: boolean }) {
-  const [side, setSide] = useState<'Buy' | 'Sell'>('Buy')
-  const [amount, setAmount] = useState('')
-  const [submitted, setSubmitted] = useState(false)
-  const value = Number(amount || 0)
-  const payingSymbol = side === 'Buy' ? 'USDC' : `$${token.ticker}`
-  const receivingSymbol = side === 'Buy' ? `$${token.ticker}` : 'USDC'
-  const receivedValue = side === 'Buy' ? value / token.price : value * token.price
-  return <div className="trade-panel"><div className="trade-tabs"><button className={side === 'Buy' ? 'active' : ''} onClick={() => setSide('Buy')}>Buy</button><button className={side === 'Sell' ? 'active sell' : ''} onClick={() => setSide('Sell')}>Sell</button></div><div className="trade-body"><div className="trade-label"><span>You pay</span><button>{payingSymbol} <ChevronDown size={13} /></button></div><div className="amount-field"><input value={amount} onChange={(event) => setAmount(event.target.value.replace(/[^0-9.]/g, ''))} placeholder="0.00" inputMode="decimal" /><span>{payingSymbol}</span></div><div className="quick-amounts"><button onClick={() => setAmount('10')}>10</button><button onClick={() => setAmount('50')}>50</button><button onClick={() => setAmount('100')}>100</button><button onClick={() => setAmount('500')}>500</button></div><div className="trade-label second"><span>You receive</span><span className="muted">Estimated</span></div><div className="receive-field"><strong>{value ? receivedValue.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '0.00'}</strong><span>{receivingSymbol}</span></div><div className="trade-summary"><span>Price impact <b>0.12%</b></span><span>Network fee <b>~$0.01</b></span></div><button className="button primary trade-button" onClick={() => { if (!connected) onConnect(); else setSubmitted(true) }} disabled={submitted}>{submitted ? <><Sparkles size={15} /> Preview order submitted</> : <><Wallet size={15} /> {connected ? `${side} ${token.ticker}` : `Connect wallet to ${side.toLowerCase()}`}</>}</button><span className="trade-mock">{submitted ? 'Demo state complete / no transaction was sent' : 'UI preview only / no transaction will be sent'}</span></div></div>
+function shortenError(message: string): string {
+  const firstLine = message.split('\n')[0].trim()
+  if (/user rejected|denied|rejected the request/i.test(message)) return 'Transaction rejected in wallet.'
+  return firstLine.length > 140 ? `${firstLine.slice(0, 140)}…` : firstLine
 }
 
-function Detail({ onConnect, wallet, tokens }: { onConnect: () => void; wallet: WalletState; tokens: Token[] }) {
+function TradePanel({ token, onConnect, connected, account, onTraded }: { token: Token; onConnect: () => void; connected: boolean; account: string | null; onTraded: () => void }) {
+  const [side, setSide] = useState<'Buy' | 'Sell'>('Buy')
+  const [amount, setAmount] = useState('')
+  const [quote, setQuote] = useState<bigint | null>(null)
+  const [quoting, setQuoting] = useState(false)
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle')
+  const [message, setMessage] = useState<string | null>(null)
+  const [txHash, setTxHash] = useState<string | null>(null)
+  const [tokenBalance, setTokenBalance] = useState('0')
+
+  const payingSymbol = side === 'Buy' ? 'USDC' : `$${token.ticker}`
+  const receivingSymbol = side === 'Buy' ? `$${token.ticker}` : 'USDC'
+  const quoteDisplay = quote != null ? Number(quote) / 1e18 : null
+
+  useEffect(() => {
+    if (!connected || !account) { setTokenBalance('0'); return }
+    let cancelled = false
+    void readTokenBalanceDirect(token.tokenAddress, account)
+      .then((balance) => { if (!cancelled) setTokenBalance(balance) })
+      .catch(() => { if (!cancelled) setTokenBalance('0') })
+    return () => { cancelled = true }
+  }, [connected, account, token.tokenAddress, status])
+
+  useEffect(() => {
+    setStatus('idle')
+    setMessage(null)
+    setTxHash(null)
+    const value = Number(amount)
+    if (!value || value <= 0) { setQuote(null); setQuoting(false); return }
+    let cancelled = false
+    setQuoting(true)
+    const handle = window.setTimeout(async () => {
+      try {
+        const out = side === 'Buy'
+          ? await readQuoteBuy(token.launchId, parseUsdc(amount))
+          : await readQuoteSell(token.launchId, parseToken(amount))
+        if (!cancelled) setQuote(out)
+      } catch {
+        if (!cancelled) setQuote(null)
+      } finally {
+        if (!cancelled) setQuoting(false)
+      }
+    }, 350)
+    return () => { cancelled = true; window.clearTimeout(handle) }
+  }, [amount, side, token.launchId])
+
+  const submit = async () => {
+    if (!connected || !account) { onConnect(); return }
+    const value = Number(amount)
+    if (!value || value <= 0) { setStatus('error'); setMessage('Enter an amount greater than zero.'); return }
+    setStatus('submitting'); setMessage(null); setTxHash(null)
+    try {
+      const minOut = quote != null ? (quote * 99n) / 100n : 0n
+      const hash = side === 'Buy'
+        ? await buyOnArc(account, token.launchId, parseUsdc(amount), minOut)
+        : await sellOnArc(account, token.launchId, token.tokenAddress, parseToken(amount), minOut)
+      setTxHash(hash)
+      await waitForArcTx(hash)
+      setStatus('success')
+      setMessage(`${side} confirmed on Arc Testnet.`)
+      setAmount('')
+      setQuote(null)
+      onTraded()
+    } catch (err) {
+      setStatus('error')
+      setMessage(err instanceof Error ? shortenError(err.message) : 'Transaction failed.')
+    }
+  }
+
+  const setPercent = (fraction: number) => {
+    const balance = Number(tokenBalance)
+    if (!balance) return
+    setAmount(String(fraction === 1 ? balance : Number((balance * fraction).toFixed(4))))
+  }
+
+  const busy = status === 'submitting'
+  return <div className="trade-panel"><div className="trade-tabs"><button className={side === 'Buy' ? 'active' : ''} onClick={() => { setSide('Buy'); setAmount('') }}>Buy</button><button className={side === 'Sell' ? 'active sell' : ''} onClick={() => { setSide('Sell'); setAmount('') }}>Sell</button></div><div className="trade-body"><div className="trade-label"><span>You pay</span><button type="button">{payingSymbol} <ChevronDown size={13} /></button></div><div className="amount-field"><input value={amount} onChange={(event) => setAmount(event.target.value.replace(/[^0-9.]/g, ''))} placeholder="0.00" inputMode="decimal" /><span>{payingSymbol}</span></div>{side === 'Buy' ? <div className="quick-amounts"><button type="button" onClick={() => setAmount('10')}>10</button><button type="button" onClick={() => setAmount('50')}>50</button><button type="button" onClick={() => setAmount('100')}>100</button><button type="button" onClick={() => setAmount('500')}>500</button></div> : <div className="quick-amounts"><button type="button" onClick={() => setPercent(0.25)}>25%</button><button type="button" onClick={() => setPercent(0.5)}>50%</button><button type="button" onClick={() => setPercent(0.75)}>75%</button><button type="button" onClick={() => setPercent(1)}>Max</button></div>}{side === 'Sell' && connected && <div className="trade-summary" style={{ marginTop: 8 }}><span>Balance <b>{Number(tokenBalance).toLocaleString(undefined, { maximumFractionDigits: 2 })} ${token.ticker}</b></span></div>}<div className="trade-label second"><span>You receive</span><span className="muted">{quoting ? 'Quoting…' : 'Estimated'}</span></div><div className="receive-field"><strong>{quoteDisplay != null ? quoteDisplay.toLocaleString(undefined, { maximumFractionDigits: 6 }) : '0.00'}</strong><span>{receivingSymbol}</span></div><div className="trade-summary"><span>Slippage tolerance <b>1%</b></span><span>Live on-chain quote <b>{quoting ? '…' : quoteDisplay != null ? '✓' : '—'}</b></span></div><button className="button primary trade-button" onClick={submit} disabled={busy}>{busy ? <><Sparkles size={15} /> Confirm in your wallet…</> : <><Wallet size={15} /> {connected ? `${side} ${token.ticker}` : `Connect wallet to ${side.toLowerCase()}`}</>}</button>{message ? <span className="trade-mock" style={{ color: status === 'error' ? 'var(--market-negative)' : status === 'success' ? 'var(--market-positive)' : undefined }}>{message}</span> : <span className="trade-mock">Trades settle on Arc Testnet · gas paid in USDC</span>}{txHash && <a className="trade-mock" href={`${ARC_TESTNET.explorerUrl}/tx/${txHash}`} target="_blank" rel="noreferrer" style={{ color: 'var(--mint)' }}>View transaction ↗</a>}</div></div>
+}
+
+function Detail({ onConnect, wallet, tokens, onTraded }: { onConnect: () => void; wallet: WalletState; tokens: Token[]; onTraded: () => void }) {
   const { id } = useParams()
   const token = tokens.find((item) => item.id === id) || tokens[0]
   const [copied, setCopied] = useState(false)
-  const copyAddress = () => { void navigator.clipboard?.writeText('0x8f...doxa'); setCopied(true); window.setTimeout(() => setCopied(false), 1600) }
-  return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><div className="detail-heading"><div className="detail-token"><TokenMark variant={token.visual} large /><div><div className="eyebrow"><StatusBadge status={token.status} /></div><h1>{token.name} <span>${token.ticker}</span></h1><p>{token.description}</p><button className="address" onClick={copyAddress}>{copied ? 'Copied to clipboard' : 'ARC / 0x8f...doxa'} <Copy size={13} /></button></div></div><div className="detail-actions"><button className="icon-button"><Search size={16} /></button><button className="button primary" onClick={onConnect}><Wallet size={15} /> {wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div></div><div className="detail-grid"><div><div className="detail-chart-shell"><TradingViewMarketChart token={token} large /></div><div className="curve-card"><div className="curve-header"><div><span>Bonding curve progress</span><strong>{token.progress}%</strong></div><span>{token.progress >= 100 ? 'Graduated' : `$${(182400 - token.marketCap).toLocaleString()} to graduation`}</span></div><div className="curve-track"><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${token.progress}%` }} /></div><div className="curve-foot"><span>Launched <b>0 USDC</b></span><span>Graduation target <b>$182.4K</b></span></div></div><MigrationCard status={token.status} /></div><aside><TradePanel token={token} onConnect={onConnect} connected={Boolean(wallet.account)} /><div className="holders-card"><div className="small-heading"><h3>Top holders</h3><a href="#holders">View all</a></div>{['0x4a…91f', '0x8f…doxa', '0xc2…52a', '0x12…b8e'].map((holder, index) => <div className="holder-row" key={holder}><span className="holder-rank">0{index + 1}</span><span>{holder}</span><b>{[12.4, 8.2, 5.8, 4.1][index]}%</b></div>)}</div></aside></div></main>
+  if (!token) return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><p style={{ marginTop: 40 }}>Loading token…</p></main>
+  const copyAddress = () => { void navigator.clipboard?.writeText(token.tokenAddress); setCopied(true); window.setTimeout(() => setCopied(false), 1600) }
+  const toGraduation = Math.max(0, GRADUATION_TARGET - token.liquidity)
+  return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><div className="detail-heading"><div className="detail-token"><TokenMark variant={token.visual} large /><div><div className="eyebrow"><StatusBadge status={token.status} /></div><h1>{token.name} <span>${token.ticker}</span></h1><p>{token.description}</p><button className="address" onClick={copyAddress}>{copied ? 'Copied to clipboard' : `ARC / ${formatWalletAddress(token.tokenAddress)}`} <Copy size={13} /></button></div></div><div className="detail-actions"><a className="icon-button" href={`${ARC_TESTNET.explorerUrl}/address/${token.tokenAddress}`} target="_blank" rel="noreferrer" aria-label="View token on explorer"><ArrowUpRight size={16} /></a><button className="button primary" onClick={onConnect}><Wallet size={15} /> {wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div></div><div className="detail-grid"><div><div className="detail-chart-shell"><TradingViewMarketChart token={token} large /></div><div className="curve-card"><div className="curve-header"><div><span>Bonding curve progress</span><strong>{token.progress.toFixed(1)}%</strong></div><span>{token.progress >= 100 ? 'Graduated' : `${toGraduation.toLocaleString(undefined, { maximumFractionDigits: 0 })} USDC to graduation`}</span></div><div className="curve-track"><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="curve-foot"><span>Liquidity <b>{token.liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</b></span><span>Graduation target <b>{GRADUATION_TARGET.toLocaleString()} USDC</b></span></div></div><MigrationCard status={token.status} /></div><aside><TradePanel token={token} onConnect={onConnect} connected={Boolean(wallet.account)} account={wallet.account} onTraded={onTraded} /><div className="holders-card"><div className="small-heading"><h3>Market</h3></div><div className="holder-row"><span className="holder-rank">01</span><span>Price</span><b>{(token.price || 0).toPrecision(3)} USDC</b></div><div className="holder-row"><span className="holder-rank">02</span><span>Market cap</span><b>${(token.marketCap / 1000).toFixed(2)}K</b></div><div className="holder-row"><span className="holder-rank">03</span><span>Creator</span><b>{formatWalletAddress(token.creator)}</b></div><div className="holder-row"><span className="holder-rank">04</span><span>Change</span><b className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change.toFixed(2)}%</b></div></div></aside></div></main>
 }
 
 function MigrationCard({ status }: { status: MigrationStatus }) {
@@ -568,7 +662,7 @@ function AdminPanel({ onRefreshTokens }: { onRefreshTokens: () => void }) {
 function App() {
   const { wallet, connect, isConnecting } = useArcWallet()
   const { tokens, loading: tokensLoading, error: tokensError, refresh: refreshTokens } = useOnChainTokens()
-  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore tokens={tokens} tokensLoading={tokensLoading} tokensError={tokensError} onRefresh={refreshTokens} />} /><Route path="/create" element={<Create wallet={wallet} onConnect={connect} />} /><Route path="/wallet" element={<WalletDashboard wallet={wallet} onConnect={connect} isConnecting={isConnecting} />} /><Route path="/token/:id" element={<Detail onConnect={connect} wallet={wallet} tokens={tokens} />} /><Route path="/admin" element={<AdminPanel onRefreshTokens={refreshTokens} />} /></Routes><MobileNav /><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right"><Link to="/admin" style={{ color: 'inherit', marginRight: 16 }}>Admin panel</Link>DOXA.xyz / 2026</span></div></footer></>
+  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore tokens={tokens} tokensLoading={tokensLoading} tokensError={tokensError} onRefresh={refreshTokens} />} /><Route path="/create" element={<Create wallet={wallet} onConnect={connect} />} /><Route path="/wallet" element={<WalletDashboard wallet={wallet} onConnect={connect} isConnecting={isConnecting} />} /><Route path="/token/:id" element={<Detail onConnect={connect} wallet={wallet} tokens={tokens} onTraded={() => refreshTokens(true)} />} /><Route path="/admin" element={<AdminPanel onRefreshTokens={refreshTokens} />} /></Routes><MobileNav /><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right"><Link to="/admin" style={{ color: 'inherit', marginRight: 16 }}>Admin panel</Link>DOXA.xyz / 2026</span></div></footer></>
 }
 
 export default App

@@ -1,4 +1,4 @@
-import { createWalletClient, createPublicClient, http, decodeFunctionResult, encodeFunctionData, type Hex, type PrivateKeyAccount } from 'viem'
+import { createWalletClient, createPublicClient, http, decodeFunctionResult, encodeFunctionData, parseUnits, type Hex, type PrivateKeyAccount } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 
 export const ARC_TESTNET = {
@@ -150,13 +150,29 @@ const launchpadAbi = [
   },
 ] as const
 
-const tokenAbi = [{
-  type: 'function',
-  name: 'balanceOf',
-  stateMutability: 'view',
-  inputs: [{ name: 'account', type: 'address' }],
-  outputs: [{ name: '', type: 'uint256' }],
-}] as const
+const tokenAbi = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'allowance',
+    stateMutability: 'view',
+    inputs: [{ name: 'owner', type: 'address' }, { name: 'spender', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'approve',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'spender', type: 'address' }, { name: 'amount', type: 'uint256' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+] as const
 
 declare global {
   interface Window {
@@ -263,32 +279,37 @@ function formatUnits(value: bigint, decimals: number, maximumFractionDigits = 4)
   return `${whole}.${fractionText}`
 }
 
-function addressArgument(address: string): string {
-  return address.replace(/^0x/, '').toLowerCase().padStart(64, '0')
+function normalizeAmount(amount: string): string {
+  let normalized = amount.trim()
+  if (normalized === '' || normalized === '.') return '0'
+  if (normalized.endsWith('.')) normalized = normalized.slice(0, -1)
+  if (normalized.startsWith('.')) normalized = `0${normalized}`
+  return normalized
 }
 
 export async function readArcWalletBalances(account: string): Promise<ArcWalletBalances> {
-  const provider = getConnectedProvider()
-  if (!provider) throw new Error('No wallet connection found.')
+  const address = account as Hex
 
-  const [nativeBalance, erc20Balance] = await Promise.all([
-    provider.request({ method: 'eth_getBalance', params: [account, 'latest'] }),
-    provider.request({
-      method: 'eth_call',
-      params: [{
-        to: ARC_TESTNET.usdcAddress,
-        data: `0x70a08231${addressArgument(account)}`,
-      }, 'latest'],
-    }),
-  ])
+  // Native USDC (the Arc gas token) via the public RPC — robust against `0x` empty returns.
+  const native = await publicClient.getBalance({ address }).catch(() => 0n)
 
-  if (typeof nativeBalance !== 'string' || typeof erc20Balance !== 'string') {
-    throw new Error('Wallet returned an invalid balance.')
+  // The native USDC precompile may or may not implement balanceOf. Never let a `0x`
+  // return crash the app (this was the source of "Cannot convert 0x to a BigInt").
+  let erc20 = 0n
+  try {
+    erc20 = (await publicClient.readContract({
+      address: ARC_TESTNET.usdcAddress as Hex,
+      abi: tokenAbi,
+      functionName: 'balanceOf',
+      args: [address],
+    })) as bigint
+  } catch {
+    erc20 = 0n
   }
 
   return {
-    nativeUsdc: formatUnits(BigInt(nativeBalance), ARC_TESTNET.nativeCurrency.decimals),
-    erc20Usdc: formatUnits(BigInt(erc20Balance), 6),
+    nativeUsdc: formatUnits(native, ARC_TESTNET.nativeCurrency.decimals),
+    erc20Usdc: formatUnits(erc20, 6),
   }
 }
 
@@ -340,7 +361,7 @@ export async function readTokenBalance(token: string, account: string): Promise<
     method: 'eth_call',
     params: [{ to: token, data }, 'latest'],
   })
-  if (typeof result !== 'string') throw new Error('Wallet returned an invalid token balance.')
+  if (typeof result !== 'string' || result === '0x') return '0'
   const balance = decodeFunctionResult({
     abi: tokenAbi,
     functionName: 'balanceOf',
@@ -419,6 +440,90 @@ export async function readTokenBalanceDirect(token: string, account: string): Pr
 export async function readNativeBalanceDirect(account: string): Promise<string> {
   const balance = await publicClient.getBalance({ address: account as Hex })
   return formatUnits(balance, 18)
+}
+
+export async function readQuoteSell(launchId: number, tokenIn: bigint): Promise<bigint> {
+  const result = await publicClient.readContract({
+    address: DOXA_LAUNCHPAD_ADDRESS,
+    abi: launchpadAbi,
+    functionName: 'quoteSell',
+    args: [BigInt(launchId), tokenIn],
+  })
+  return result as bigint
+}
+
+export function parseUsdc(amount: string): bigint {
+  return parseUnits(normalizeAmount(amount), ARC_TESTNET.nativeCurrency.decimals)
+}
+
+export function parseToken(amount: string): bigint {
+  return parseUnits(normalizeAmount(amount), 18)
+}
+
+export async function waitForArcTx(hash: string): Promise<void> {
+  await publicClient.waitForTransactionReceipt({ hash: hash as Hex })
+}
+
+// --- Connected-wallet signed trades (buy / sell) ---
+
+export async function buyOnArc(account: string, launchId: number, nativeIn: bigint, minTokenOut: bigint = 0n): Promise<string> {
+  const provider = getConnectedProvider()
+  if (!provider) throw new Error('No wallet connection found.')
+  const data = encodeFunctionData({ abi: launchpadAbi, functionName: 'buy', args: [BigInt(launchId), minTokenOut] })
+  const hash = await provider.request({
+    method: 'eth_sendTransaction',
+    params: [{ from: account, to: DOXA_LAUNCHPAD_ADDRESS, data, value: `0x${nativeIn.toString(16)}` }],
+  })
+  if (typeof hash !== 'string') throw new Error('Wallet did not return a transaction hash.')
+  return hash
+}
+
+export async function sellOnArc(account: string, launchId: number, token: string, tokenIn: bigint, minNativeOut: bigint = 0n): Promise<string> {
+  const provider = getConnectedProvider()
+  if (!provider) throw new Error('No wallet connection found.')
+
+  // The launchpad pulls tokens via transferFrom, so ensure it is approved first.
+  const allowance = (await publicClient.readContract({
+    address: token as Hex,
+    abi: tokenAbi,
+    functionName: 'allowance',
+    args: [account as Hex, DOXA_LAUNCHPAD_ADDRESS],
+  })) as bigint
+  if (allowance < tokenIn) {
+    const approveData = encodeFunctionData({ abi: tokenAbi, functionName: 'approve', args: [DOXA_LAUNCHPAD_ADDRESS, tokenIn] })
+    const approveHash = await provider.request({
+      method: 'eth_sendTransaction',
+      params: [{ from: account, to: token, data: approveData }],
+    })
+    if (typeof approveHash === 'string') await publicClient.waitForTransactionReceipt({ hash: approveHash as Hex })
+  }
+
+  const data = encodeFunctionData({ abi: launchpadAbi, functionName: 'sell', args: [BigInt(launchId), tokenIn, minNativeOut] })
+  const hash = await provider.request({
+    method: 'eth_sendTransaction',
+    params: [{ from: account, to: DOXA_LAUNCHPAD_ADDRESS, data }],
+  })
+  if (typeof hash !== 'string') throw new Error('Wallet did not return a transaction hash.')
+  return hash
+}
+
+// Reconstruct the real price path a token has traded along its bonding curve, derived
+// purely from the current on-chain reserves (constant-product with virtual reserves).
+// price(r) = (n0 + r)^2 / k, where n0 is the virtual native reserve at launch.
+export function buildCurvePriceSeries(launch: ArcLaunch, points = 48): number[] {
+  const virtualNative = Number(launch.virtualNativeReserve) / 1e18
+  const virtualToken = Number(launch.virtualTokenReserve) / 1e18
+  const realNative = Number(launch.nativeReserve) / 1e18
+  if (virtualNative <= 0 || virtualToken <= 0) return []
+  const k = virtualNative * virtualToken
+  const n0 = virtualNative - realNative
+  const series: number[] = []
+  for (let i = 0; i < points; i++) {
+    const r = (realNative * i) / (points - 1)
+    const nativeAt = n0 + r
+    series.push((nativeAt * nativeAt) / k)
+  }
+  return series
 }
 
 // --- Private-key signed transactions (for admin bot) ---
