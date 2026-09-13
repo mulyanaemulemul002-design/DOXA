@@ -3,7 +3,7 @@ import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ArrowUpRight, ChevronDown, CircleHelp, Copy, Flame, Grid2X2, ImagePlus, ListFilter, Menu, Search, Sparkles, TrendingUp, Users, Wallet, X, Zap } from 'lucide-react'
 import { CandlestickSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 import { useAppKit, useAppKitAccount, useAppKitProvider } from '@reown/appkit/react'
-import { ARC_TESTNET, DEPLOY_FEE_USDC, GRADUATION_TARGET_USDC, TOKEN_SUPPLY, aggregateTradesToOHLC, formatWalletAddress, getAccountFromPrivateKey, launchTokenOnArc, readLaunchAnalytics, readArcWalletBalances, readLaunchesDirect, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, uploadLaunchMetadata, resolveIpfsUri, setArcWalletProvider, readLiveTapeEvents, type ArcAnalytics, type ArcLaunch, type ArcTapeEvent, type ArcWalletBalances, type Eip1193Provider, type OHLCBucket } from './lib/arc'
+import { ARC_TESTNET, DEPLOY_FEE_USDC, GRADUATION_TARGET_USDC, TOKEN_SUPPLY, aggregateTradesToOHLC, formatWalletAddress, getAccountFromPrivateKey, launchTokenOnArc, readLaunchAnalytics, readArcWalletBalances, readLaunchesDirect, readLiveTapeEvents, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, uploadLaunchMetadata, resolveIpfsUri, setArcWalletProvider, type ArcAnalytics, type ArcLaunch, type ArcTapeEvent, type ArcWalletBalances, type Eip1193Provider, type OHLCBucket } from './lib/arc'
 import { REOWN_PROJECT_ID } from './lib/reown'
 
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
@@ -49,6 +49,7 @@ function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
 
 function useOnChainTokens() {
   const [tokens, setTokens] = useState<Token[]>([])
+  const [launches, setLaunches] = useState<ArcLaunch[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -56,11 +57,15 @@ function useOnChainTokens() {
     try {
       if (!silent) setLoading(true)
       setError(null)
-      const launches = await readLaunchesDirect()
-      setTokens(launches.map(mapLaunchToToken))
+      const nextLaunches = await readLaunchesDirect()
+      setLaunches(nextLaunches)
+      setTokens(nextLaunches.map(mapLaunchToToken))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load on-chain launches.')
-      if (!silent) setTokens([])
+      if (!silent) {
+        setLaunches([])
+        setTokens([])
+      }
     } finally {
       if (!silent) setLoading(false)
     }
@@ -71,7 +76,35 @@ function useOnChainTokens() {
     const interval = window.setInterval(() => { void refresh(true) }, 20000)
     return () => window.clearInterval(interval)
   }, [])
-  return { tokens, loading, error, refresh }
+  return { tokens, launches, loading, error, refresh }
+}
+
+function useLiveTape(launches: ArcLaunch[]) {
+  const [events, setEvents] = useState<ArcTapeEvent[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async () => {
+      if (launches.length === 0) {
+        setEvents([])
+        return
+      }
+      try {
+        const nextEvents = await readLiveTapeEvents(launches)
+        if (!cancelled) setEvents(nextEvents)
+      } catch {
+        // Keep the last successful tape while the chain endpoint recovers.
+      }
+    }
+    void refresh()
+    const interval = window.setInterval(() => { void refresh() }, 30000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [launches])
+
+  return events
 }
 
 const navItems = [{ label: 'Explore', to: '/' }, { label: 'Create', to: '/create' }]
@@ -237,15 +270,13 @@ function MarketChart({ token, large = false, metric = 'price' }: { token: Token;
   return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''}`} aria-label={`${token.name} price trend chart`}><div className="market-chart-grid" /><svg viewBox="0 0 120 100" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id={fillId} x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="currentColor" stopOpacity=".28" /><stop offset="100%" stopColor="currentColor" stopOpacity="0" /></linearGradient></defs><path className="chart-area" d={area} fill={`url(#${fillId})`} /><path className="chart-line" d={line} fill="none" stroke="currentColor" strokeWidth={large ? '1.6' : '1.8'} vectorEffect="non-scaling-stroke" /></svg>{large && <div className="chart-labels"><span>Launch</span><span>25%</span><span>50%</span><span>Now</span><b>{metric === 'price' ? `${(token.price || 0).toPrecision(3)}` : `${(token.marketCap / 1000).toFixed(1)}K`}</b></div>}</div>
 }
 
-function LiveTape() {
-  const events = [
-    { label: 'NEW', token: 'Mochi Signal', ticker: '$MOCHI', value: 'just launched', tone: 'mint' },
-    { label: 'BUY', token: 'Keyboard Cat', ticker: '$KEYS', value: '12.4 USDC', tone: 'buy' },
-    { label: 'BUY', token: 'Night Shift', ticker: '$NITE', value: '48.0 USDC', tone: 'buy' },
-    { label: 'CURVE', token: 'Arcade Ghost', ticker: '$GHOST', value: '64% filled', tone: 'curve' },
-    { label: 'NEW', token: 'Toad Frog', ticker: '$TOAD', value: '18m ago', tone: 'mint' },
-  ]
-  return <div className="live-tape" aria-label="Live launch activity"><div className="live-tape-label"><span className="pulse" /> Live feed</div><div className="live-tape-window"><div className="live-tape-track">{[...events, ...events].map((event, index) => <span className="live-event" key={`${event.ticker}-${index}`}><b className={`event-label ${event.tone}`}>{event.label}</b><strong>{event.token}</strong><em>{event.ticker}</em><small>{event.value}</small></span>)}</div></div></div>
+function formatTapeAmount(amount: bigint): string {
+  return `${(Number(amount) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC`
+}
+
+function LiveTape({ events }: { events: ArcTapeEvent[] }) {
+  const items = events.length > 0 ? [...events, ...events] : []
+  return <div className="live-tape" aria-label="Live on-chain activity"><div className="live-tape-label"><span className="pulse" /> Live feed</div><div className="live-tape-window">{items.length > 0 ? <div className="live-tape-track">{items.map((event, index) => <span className={`live-event ${event.large ? 'large' : ''}`} key={`${event.transactionHash}-${index}`}><b className={`event-label ${event.type.toLowerCase()}`}>{event.type}</b><strong>{event.tokenName}</strong><em>${event.ticker}</em><small>{formatTapeAmount(event.usdcAmount)} · {formatWalletAddress(event.wallet)}</small></span>)}</div> : <div className="live-tape-empty">Waiting for BUY, SELL, or MIGRATION activity on Arc.</div>}</div></div>
 }
 
 function LaunchCard({ token }: { token: Token }) {
@@ -253,7 +284,7 @@ function LaunchCard({ token }: { token: Token }) {
   return <Link to={`/token/${token.id}`} className={`launch-card card-${token.visual}`}><div className="launch-card-top"><div className="launch-card-identity"><TokenMark variant={token.visual} large /><div><div className="launch-card-name"><h3>{token.name}</h3><span>${token.ticker}</span></div><p>{token.description}</p><div className="launch-card-creator">created by <b>{token.creator}</b></div></div></div><strong className={`launch-change ${token.change < 0 ? 'negative' : 'positive'}`}>{token.change > 0 ? '+' : ''}{token.change}%</strong></div><div className="launch-chart-row"><MarketChart token={token} /><div className="launch-card-stats"><span><small>MARKET CAP</small><b>${(token.marketCap / 1000).toFixed(token.marketCap < 10000 ? 2 : 1)}K</b></span><span><small>VOLUME 24H</small><b>${(token.volume / 1000).toFixed(1)}K</b></span><span><small>HOLDERS</small><b><Users size={12} /> {token.holders}</b></span></div></div><div className="migration-progress"><div className="migration-progress-head"><span><TrendingUp size={13} /> {isMigrated ? 'Graduated & migrated' : token.status === 'graduating' ? 'Near graduation' : 'Bonding curve progress'}</span><b>{token.progress.toFixed(3)}%</b></div><div className={`migration-track ${isMigrated ? 'complete' : ''}`}><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="migration-foot"><span>{isMigrated ? 'Liquidity migrated to market' : `${(100 - token.progress).toFixed(1)}% until migration`}</span><small>{token.created}</small></div></div></Link>
 }
 
-function Explore({ tokens, tokensLoading, tokensError, onRefresh }: { tokens: Token[]; tokensLoading: boolean; tokensError: string | null; onRefresh: () => void }) {
+function Explore({ tokens, tapeEvents, tokensLoading, tokensError, onRefresh }: { tokens: Token[]; tapeEvents: ArcTapeEvent[]; tokensLoading: boolean; tokensError: string | null; onRefresh: () => void }) {
   const [filter, setFilter] = useState('Trending')
   const [statusFilter, setStatusFilter] = useState<MigrationStatus | 'all'>('all')
   const [search, setSearch] = useState('')
@@ -262,7 +293,7 @@ function Explore({ tokens, tokensLoading, tokensError, onRefresh }: { tokens: To
   if (tokensLoading) return <main className="home-shell"><div className="container" style={{ padding: '120px 32px', textAlign: 'center' }}><div className="eyebrow"><span className="pulse" /> Loading on-chain data</div><h2 style={{ marginTop: 16 }}>Reading launches from Arc testnet…</h2></div></main>
   if (tokensError) return <main className="home-shell"><div className="container" style={{ padding: '120px 32px', textAlign: 'center' }}><div className="eyebrow" style={{ color: 'var(--market-negative)' }}>Connection error</div><h2 style={{ marginTop: 16 }}>{tokensError}</h2><button className="button primary" onClick={onRefresh} style={{ marginTop: 20 }}>Retry</button></div></main>
   if (tokens.length === 0) return <main className="home-shell"><div className="container" style={{ padding: '120px 32px', textAlign: 'center' }}><div className="eyebrow"><span className="pulse" /> No launches yet</div><h2 style={{ marginTop: 16 }}>No tokens have been launched on this contract yet.</h2><Link className="button primary" to="/create" style={{ marginTop: 20 }}>Create the first launch <ArrowUpRight size={16} /></Link></div></main>
-  return <main className="home-shell"><section className="home-hero container"><div className="home-hero-copy"><div className="eyebrow"><span className="pulse" /> ARC / USDC launchpad</div><h1>Launch early.<br /><span>Trade loud.</span></h1><p>A live board for the tokens forming conviction on Arc. Find the newest launches, watch the curve fill, and move before the crowd.</p><div className="hero-actions"><Link className="button primary" to="/create">Create launch <ArrowUpRight size={16} /></Link><a className="text-link" href="#explore">View new launches <span>↓</span></a></div><div className="home-stats"><span><b>{String(tokens.length).padStart(2, '0')}</b> tracked launches</span><span><b>01%</b> platform fee</span><span><b>ARC</b> testnet live</span></div></div><div className="signal-panel"><div className="signal-panel-top"><span><span className="pulse" /> Featured curve</span><span>{String(Math.min(trending.length, 3)).padStart(2, '0')} / 03</span></div><div className="signal-token"><TokenMark variant={trending[0].visual} large /><div><span className="signal-kicker">Moving now</span><h2>{trending[0].name}</h2><strong>${trending[0].ticker}</strong></div><b className="positive">{trending[0].progress.toFixed(1)}%</b></div><div className="signal-chart"><TradingViewMarketChart token={trending[0]} large /></div><div className="signal-metrics"><span><small>PRICE</small>${trending[0].price.toFixed(5)}</span><span><small>MARKET CAP</small>${(trending[0].marketCap / 1000).toFixed(1)}K</span><span><small>CURVE</small>{trending[0].progress.toFixed(1)}%</span></div><Link className="signal-link" to={`/token/${trending[0].id}`}>Open terminal <ArrowUpRight size={15} /></Link></div></section><LiveTape /><section id="explore" className="launch-board container"><div className="board-heading"><div><div className="eyebrow">Launch terminal</div><h2>Find your next <span>runner.</span></h2><p>Fresh launches and curves in motion, sorted for fast decisions.</p></div><div className="board-count"><strong>{filteredTokens.length}</strong><span>visible launches</span></div></div><div className="board-controls"><div className="filters">{['Trending', 'New launches', 'Graduating'].map((item) => <button key={item} className={filter === item ? 'filter active' : 'filter'} onClick={() => setFilter(item)}>{item}</button>)}</div><div className="search-box"><Search size={16} /><input aria-label="Search tokens" placeholder="Search ticker or launch" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div><div className="launch-discovery-bar"><div className="launch-status-tabs">{([{ value: 'all', label: 'All tokens' }, { value: 'active', label: 'Bonding' }, { value: 'graduating', label: 'Near graduation' }, { value: 'migrated', label: 'Migrated' }] as const).map((item) => <button key={item.value} className={statusFilter === item.value ? 'active' : ''} onClick={() => setStatusFilter(item.value)}>{item.label}</button>)}</div><div className="launch-toolbar-actions"><button onClick={onRefresh} style={{ background: 'transparent', border: '1px solid #2c4333', color: '#70dc8b', borderRadius: 8, padding: '6px 10px', font: '10px DM Mono', cursor: 'pointer' }}>Refresh</button><span><Flame size={14} /> Live board</span><button aria-label="Grid view" className="view-toggle active"><Grid2X2 size={15} /></button><button aria-label="Filter options" className="view-toggle"><ListFilter size={15} /></button></div></div><div className="launch-grid">{filteredTokens.map((token) => <LaunchCard key={token.id} token={token} />)}</div></section></main>
+  return <main className="home-shell"><section className="home-hero container"><div className="home-hero-copy"><div className="eyebrow"><span className="pulse" /> ARC / USDC launchpad</div><h1>Launch early.<br /><span>Trade loud.</span></h1><p>A live board for the tokens forming conviction on Arc. Find the newest launches, watch the curve fill, and move before the crowd.</p><div className="hero-actions"><Link className="button primary" to="/create">Create launch <ArrowUpRight size={16} /></Link><a className="text-link" href="#explore">View new launches <span>↓</span></a></div><div className="home-stats"><span><b>{String(tokens.length).padStart(2, '0')}</b> tracked launches</span><span><b>01%</b> platform fee</span><span><b>ARC</b> testnet live</span></div></div><div className="signal-panel"><div className="signal-panel-top"><span><span className="pulse" /> Featured curve</span><span>{String(Math.min(trending.length, 3)).padStart(2, '0')} / 03</span></div><div className="signal-token"><TokenMark variant={trending[0].visual} large /><div><span className="signal-kicker">Moving now</span><h2>{trending[0].name}</h2><strong>${trending[0].ticker}</strong></div><b className="positive">{trending[0].progress.toFixed(1)}%</b></div><div className="signal-chart"><TradingViewMarketChart token={trending[0]} large /></div><div className="signal-metrics"><span><small>PRICE</small>${trending[0].price.toFixed(5)}</span><span><small>MARKET CAP</small>${(trending[0].marketCap / 1000).toFixed(1)}K</span><span><small>CURVE</small>{trending[0].progress.toFixed(1)}%</span></div><Link className="signal-link" to={`/token/${trending[0].id}`}>Open terminal <ArrowUpRight size={15} /></Link></div></section><LiveTape events={tapeEvents} /><section id="explore" className="launch-board container"><div className="board-heading"><div><div className="eyebrow">Launch terminal</div><h2>Find your next <span>runner.</span></h2><p>Fresh launches and curves in motion, sorted for fast decisions.</p></div><div className="board-count"><strong>{filteredTokens.length}</strong><span>visible launches</span></div></div><div className="board-controls"><div className="filters">{['Trending', 'New launches', 'Graduating'].map((item) => <button key={item} className={filter === item ? 'filter active' : 'filter'} onClick={() => setFilter(item)}>{item}</button>)}</div><div className="search-box"><Search size={16} /><input aria-label="Search tokens" placeholder="Search ticker or launch" value={search} onChange={(event) => setSearch(event.target.value)} /></div></div><div className="launch-discovery-bar"><div className="launch-status-tabs">{([{ value: 'all', label: 'All tokens' }, { value: 'active', label: 'Bonding' }, { value: 'graduating', label: 'Near graduation' }, { value: 'migrated', label: 'Migrated' }] as const).map((item) => <button key={item.value} className={statusFilter === item.value ? 'active' : ''} onClick={() => setStatusFilter(item.value)}>{item.label}</button>)}</div><div className="launch-toolbar-actions"><button onClick={onRefresh} style={{ background: 'transparent', border: '1px solid #2c4333', color: '#70dc8b', borderRadius: 8, padding: '6px 10px', font: '10px DM Mono', cursor: 'pointer' }}>Refresh</button><span><Flame size={14} /> Live board</span><button aria-label="Grid view" className="view-toggle active"><Grid2X2 size={15} /></button><button aria-label="Filter options" className="view-toggle"><ListFilter size={15} /></button></div></div><div className="launch-grid">{filteredTokens.map((token) => <LaunchCard key={token.id} token={token} />)}</div></section></main>
 }
 
 function MobileNav() {
@@ -728,8 +759,9 @@ function AdminPanel({ onRefreshTokens }: { onRefreshTokens: () => void }) {
 
 function App() {
   const { wallet, connect, isConnecting } = useArcWallet()
-  const { tokens, loading: tokensLoading, error: tokensError, refresh: refreshTokens } = useOnChainTokens()
-  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore tokens={tokens} tokensLoading={tokensLoading} tokensError={tokensError} onRefresh={refreshTokens} />} /><Route path="/create" element={<Create wallet={wallet} onConnect={connect} />} /><Route path="/wallet" element={<WalletDashboard wallet={wallet} onConnect={connect} isConnecting={isConnecting} />} /><Route path="/token/:id" element={<Detail onConnect={connect} wallet={wallet} tokens={tokens} onTraded={() => refreshTokens(true)} />} /><Route path="/admin" element={<AdminPanel onRefreshTokens={refreshTokens} />} /></Routes><MobileNav /><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right"><Link to="/admin" style={{ color: 'inherit', marginRight: 16 }}>Admin panel</Link>DOXA.xyz / 2026</span></div></footer></>
+  const { tokens, launches, loading: tokensLoading, error: tokensError, refresh: refreshTokens } = useOnChainTokens()
+  const tapeEvents = useLiveTape(launches)
+  return <><Header wallet={wallet} onConnect={connect} isConnecting={isConnecting} /><Routes><Route path="/" element={<Explore tokens={tokens} tapeEvents={tapeEvents} tokensLoading={tokensLoading} tokensError={tokensError} onRefresh={refreshTokens} />} /><Route path="/create" element={<Create wallet={wallet} onConnect={connect} />} /><Route path="/wallet" element={<WalletDashboard wallet={wallet} onConnect={connect} isConnecting={isConnecting} />} /><Route path="/token/:id" element={<Detail onConnect={connect} wallet={wallet} tokens={tokens} onTraded={() => refreshTokens(true)} />} /><Route path="/admin" element={<AdminPanel onRefreshTokens={refreshTokens} />} /></Routes><MobileNav /><footer className="site-footer"><div className="container footer-inner"><Logo /><span>Built for the ARC testnet.</span><span className="footer-right"><Link to="/admin" style={{ color: 'inherit', marginRight: 16 }}>Admin panel</Link>DOXA.xyz / 2026</span></div></footer></>
 }
 
 export default App

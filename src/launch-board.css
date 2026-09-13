@@ -126,10 +126,15 @@
 
 .event-label{border:1px solid currentColor!important;background:transparent!important;font-weight:500!important;letter-spacing:.04em}
 .event-label.buy{color:var(--market-positive)!important}
+.event-label.sell{color:var(--market-negative)!important}
+.event-label.migration{color:var(--market-warning)!important}
 .event-label.curve{color:var(--market-warning)!important}
 .event-label.mint{color:var(--mint)!important}
 .live-event strong{color:#dce8df}
 .live-event em,.live-event small{color:#7d9084}
+.live-event.large strong{color:var(--mint);font-size:1.04em}
+.live-event.large small{color:#d9f5e4}
+.live-tape-empty{padding:18px 24px;color:var(--muted);font:11px 'DM Mono';white-space:nowrap}
 .launch-change{background:rgba(70,216,137,.12);color:var(--market-positive)!important;border:1px solid rgba(70,216,137,.32)}
 .launch-change.negative{background:rgba(224,127,118,.12);color:var(--market-negative)!important;border-color:rgba(224,127,118,.32)}
 .migration-track span{background:var(--market-positive);box-shadow:none}

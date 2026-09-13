@@ -22,6 +22,9 @@ export const BONDING_CURVE_SUPPLY = 780_000_000
 export const GRADUATION_TARGET_USDC = 69_000
 export const TICKER_MIN_USDC_THRESHOLD = 20
 export const TICKER_LARGE_USDC_THRESHOLD = 500
+const USDC_DECIMALS = 10n ** 18n
+const TICKER_MIN_USDC_WEI = BigInt(TICKER_MIN_USDC_THRESHOLD) * USDC_DECIMALS
+const TICKER_LARGE_USDC_WEI = BigInt(TICKER_LARGE_USDC_THRESHOLD) * USDC_DECIMALS
 
 type RequestArguments = {
   method: string
@@ -537,7 +540,7 @@ export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTape
       wallet: args.trader ?? '',
       timestamp: args.timestamp ?? 0n,
       transactionHash: log.transactionHash ?? '',
-      large: Number(usdcAmount) / 1e18 >= TICKER_LARGE_USDC_THRESHOLD,
+      large: usdcAmount >= TICKER_LARGE_USDC_WEI,
     })
   }
   for (const log of migrationLogs) {
@@ -556,7 +559,7 @@ export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTape
     })
   }
   return events
-    .filter((event) => event.type === 'MIGRATION' || Number(event.usdcAmount) / 1e18 >= TICKER_MIN_USDC_THRESHOLD)
+    .filter((event) => event.type === 'MIGRATION' || event.usdcAmount >= TICKER_MIN_USDC_WEI)
     .sort((a, b) => Number(b.timestamp - a.timestamp))
     .slice(0, 80)
 }

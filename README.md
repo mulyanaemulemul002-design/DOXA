@@ -45,6 +45,6 @@ npm run contract:deploy
 
 Optional environment variables are documented in `.env.example`. The default testnet parameters are a `69,000 USDC` graduation target and a fixed `1%` fee. The deployment script writes the public result to `deployments/arc-testnet.json`.
 
-The Create page requires a `VITE_PINATA_JWT` environment secret for the Pinata IPFS image and metadata upload. Without it, token creation is intentionally blocked rather than storing local-only metadata.
+The Create page uploads token images and metadata through the server-only `/api/ipfs` endpoint. Configure `PINATA_JWT` as a server secret; it must never use a `VITE_` prefix or be exposed to the browser. Without it, token creation is intentionally blocked rather than storing local-only metadata.
 
 This contract is not audited and is intended for Arc Testnet only.
