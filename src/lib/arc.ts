@@ -267,14 +267,9 @@ const tokenAbi = [
   },
 ] as const
 
-declare global {
-  interface Window {
-    ethereum?: Eip1193Provider
-  }
-}
-
 export function getInjectedProvider(): Eip1193Provider | undefined {
-  return typeof window === 'undefined' ? undefined : window.ethereum
+  if (typeof window === 'undefined') return undefined
+  return (window as Window & { ethereum?: Eip1193Provider }).ethereum
 }
 
 let appKitProvider: Eip1193Provider | undefined

@@ -39,7 +39,7 @@ export const reownConfig = REOWN_PROJECT_ID
       features: {
         analytics: true,
         email: false,
-        socials: false,
+        socials: [],
       },
       themeVariables: {
         '--w3m-accent': '#2ee6a0',

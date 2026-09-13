@@ -4,8 +4,6 @@ import { ArrowUpRight, ChevronDown, CircleHelp, Copy, Flame, Grid2X2, ImagePlus,
 import { CandlestickSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
 import { useAppKit, useAppKitAccount, useAppKitProvider } from '@reown/appkit/react'
 import { ARC_TESTNET, DEPLOY_FEE_USDC, GRADUATION_TARGET_USDC, TOKEN_SUPPLY, aggregateTradesToOHLC, formatWalletAddress, getAccountFromPrivateKey, launchTokenOnArc, readLaunchAnalytics, readArcWalletBalances, readLaunchesDirect, readLiveTapeEvents, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, uploadLaunchMetadata, resolveIpfsUri, setArcWalletProvider, type ArcAnalytics, type ArcLaunch, type ArcTapeEvent, type ArcWalletBalances, type Eip1193Provider, type OHLCBucket } from './lib/arc'
-import { REOWN_PROJECT_ID } from './lib/reown'
-
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
 type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; metadataURI: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number; priceSeries: number[] }
 
@@ -115,13 +113,7 @@ type WalletState = {
   error: string | null
 }
 
-function useFallbackWallet() {
-  const [wallet, setWallet] = useState<WalletState>({ account: null, balances: null, error: null })
-  const connect = () => setWallet((current) => ({ ...current, error: 'Wallet connection is not configured. Add VITE_REOWN_PROJECT_ID to enable Reown AppKit.' }))
-  return { wallet, connect, isConnecting: false }
-}
-
-function useReownWallet() {
+function useArcWallet() {
   const { address } = useAppKitAccount({ namespace: 'eip155' })
   const { walletProvider } = useAppKitProvider<Eip1193Provider>('eip155')
   const { open } = useAppKit()
