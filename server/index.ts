@@ -96,15 +96,16 @@ async function start(): Promise<void> {
     appType: 'spa',
   })
   const server = createHttpServer((request, response) => {
-    if (request.url?.split('?')[0] === '/api/ipfs') {
+    const pathname = request.url?.split('?')[0]
+    if (pathname === '/health') {
+      writeJson(response, 200, { ok: true })
+      return
+    }
+    if (pathname === '/api/ipfs') {
       void handleIpfs(request, response)
       return
     }
-    vite.middlewares(request, response, async () => {
-      if (request.url === '/health') {
-        writeJson(response, 200, { ok: true })
-        return
-      }
+    vite.middlewares(request, response, () => {
       response.statusCode = 404
       response.end('Not found')
     })
