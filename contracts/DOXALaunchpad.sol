@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @notice Minimal ERC-20 used by the DOXA testnet launchpad.
-/// @dev Tokens are minted once to the launchpad and released through its curve.
+/// @notice Minimal fixed-supply ERC-20 used by the DOXA launchpad.
 contract DOXAToken {
     string public name;
     string public symbol;
@@ -13,7 +12,6 @@ contract DOXAToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    error NotLaunchpad();
     error InvalidAddress();
     error InsufficientBalance();
     error InsufficientAllowance();
@@ -64,16 +62,20 @@ contract DOXAToken {
     }
 }
 
-/// @title DOXA Launchpad
-/// @notice Pump.fun-style bonding curve for the Arc Testnet.
-/// @dev Arc native value is USDC-denominated with 18 decimals. This contract
-/// intentionally stops trading at graduation; migration to a DEX is a later,
-/// separately audited step.
+/// @title DOXA Launchpad V2
+/// @notice Fixed 1B supply, 78/22 curve-liquidity allocation and a USDC curve on Arc.
+/// @dev Graduation emits a migration-ready event. Actual DEX migration remains a
+/// separately audited integration, so no custodial LP withdrawal path exists here.
 contract DOXALaunchpad {
     uint256 public constant BPS = 10_000;
-    uint256 public constant MAX_FEE_BPS = 500;
+    uint256 public constant FEE_BPS = 100;
+    uint256 public constant CREATOR_FEE_BPS = 5;
     uint256 public constant TOKEN_SUPPLY = 1_000_000_000 ether;
+    uint256 public constant BONDING_CURVE_SUPPLY = 780_000_000 ether;
+    uint256 public constant DEX_LIQUIDITY_SUPPLY = 220_000_000 ether;
+    uint256 public constant CREATOR_BUY_LIMIT = 30_000_000 ether;
     uint256 public constant VIRTUAL_NATIVE_RESERVE = 1_000 ether;
+    uint256 public constant DEPLOY_FEE = 5 ether;
 
     struct Launch {
         address token;
@@ -81,6 +83,7 @@ contract DOXALaunchpad {
         string name;
         string symbol;
         string description;
+        string metadataURI;
         uint256 virtualNativeReserve;
         uint256 virtualTokenReserve;
         uint256 nativeReserve;
@@ -92,11 +95,11 @@ contract DOXALaunchpad {
     address public admin;
     address public treasury;
     uint256 public graduationTarget;
-    uint256 public feeBps;
     uint256 public launchCount;
     bool public paused;
 
     mapping(uint256 => Launch) private launches;
+    mapping(address => string) public metadataURI;
     uint256 private reentrancyState = 1;
 
     error Unauthorized();
@@ -109,26 +112,40 @@ contract DOXALaunchpad {
     error Slippage();
     error TransferFailed();
     error Reentrancy();
+    error IncorrectDeployFee();
+    error CreatorBuyLimitExceeded();
 
-    event TokenLaunched(
+    event TokenCreated(
         uint256 indexed launchId,
         address indexed token,
         address indexed creator,
         string name,
         string symbol,
-        string description
+        string metadataURI
     );
     event Trade(
         uint256 indexed launchId,
         address indexed trader,
         bool indexed isBuy,
-        uint256 nativeAmount,
         uint256 tokenAmount,
-        uint256 fee
+        uint256 usdcAmount,
+        uint256 price,
+        uint256 timestamp
     );
-    event Graduated(uint256 indexed launchId, address indexed token, uint256 nativeReserve);
+    event FeesDistributed(
+        address indexed token,
+        address indexed creator,
+        uint256 creatorFee,
+        uint256 platformFee
+    );
+    event Graduated(
+        uint256 indexed launchId,
+        address indexed token,
+        uint256 nativeReserve,
+        uint256 remainingCurveTokens,
+        uint256 liquidityTokens
+    );
     event TreasuryUpdated(address indexed treasury);
-    event FeeUpdated(uint256 feeBps);
     event GraduationTargetUpdated(uint256 target);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event PausedUpdated(bool paused);
@@ -150,24 +167,29 @@ contract DOXALaunchpad {
         _;
     }
 
-    constructor(address admin_, address treasury_, uint256 graduationTarget_, uint256 feeBps_) {
+    constructor(address admin_, address treasury_, uint256 graduationTarget_) {
         if (admin_ == address(0) || treasury_ == address(0)) revert InvalidAddress();
-        if (graduationTarget_ == 0 || feeBps_ > MAX_FEE_BPS) revert InvalidParameter();
+        if (graduationTarget_ == 0) revert InvalidParameter();
         admin = admin_;
         treasury = treasury_;
         graduationTarget = graduationTarget_;
-        feeBps = feeBps_;
     }
 
+    /// @notice Creates a token and permanently registers its IPFS metadata URI.
+    /// The fixed 5 USDC fee is forwarded to the platform treasury atomically.
     function createLaunch(
         string calldata name_,
         string calldata symbol_,
-        string calldata description_
-    ) external whenNotPaused returns (uint256 launchId, address token) {
+        string calldata description_,
+        string calldata metadataURI_
+    ) external payable whenNotPaused returns (uint256 launchId, address token) {
+        if (msg.value != DEPLOY_FEE) revert IncorrectDeployFee();
         if (bytes(name_).length == 0 || bytes(symbol_).length == 0 || bytes(symbol_).length > 12) {
             revert InvalidParameter();
         }
+        if (bytes(metadataURI_).length == 0) revert InvalidParameter();
 
+        _sendNative(treasury, msg.value);
         launchId = launchCount++;
         token = address(new DOXAToken(name_, symbol_, address(this), TOKEN_SUPPLY));
         launches[launchId] = Launch({
@@ -176,14 +198,16 @@ contract DOXALaunchpad {
             name: name_,
             symbol: symbol_,
             description: description_,
+            metadataURI: metadataURI_,
             virtualNativeReserve: VIRTUAL_NATIVE_RESERVE,
-            virtualTokenReserve: TOKEN_SUPPLY,
+            virtualTokenReserve: BONDING_CURVE_SUPPLY,
             nativeReserve: 0,
-            tokenReserve: TOKEN_SUPPLY,
+            tokenReserve: BONDING_CURVE_SUPPLY,
             createdAt: block.timestamp,
             graduated: false
         });
-        emit TokenLaunched(launchId, token, msg.sender, name_, symbol_, description_);
+        metadataURI[token] = metadataURI_;
+        emit TokenCreated(launchId, token, msg.sender, name_, symbol_, metadataURI_);
     }
 
     function buy(uint256 launchId, uint256 minTokenOut)
@@ -197,19 +221,26 @@ contract DOXALaunchpad {
         if (launch.graduated) revert AlreadyGraduated();
         if (msg.value == 0) revert EmptyValue();
 
-        uint256 fee = (msg.value * feeBps) / BPS;
+        uint256 fee = (msg.value * FEE_BPS) / BPS;
+        uint256 creatorFee = (msg.value * CREATOR_FEE_BPS) / BPS;
+        uint256 platformFee = fee - creatorFee;
         uint256 netValue = msg.value - fee;
         tokenOut = _quoteBuy(launch, netValue);
         if (tokenOut == 0 || tokenOut > launch.tokenReserve || tokenOut < minTokenOut) revert Slippage();
+        if (msg.sender == launch.creator && DOXAToken(launch.token).balanceOf(msg.sender) + tokenOut > CREATOR_BUY_LIMIT) {
+            revert CreatorBuyLimitExceeded();
+        }
 
-        _sendNative(treasury, fee);
         launch.virtualNativeReserve += netValue;
         launch.virtualTokenReserve -= tokenOut;
         launch.nativeReserve += netValue;
         launch.tokenReserve -= tokenOut;
         DOXAToken(launch.token).transfer(msg.sender, tokenOut);
+        _sendNative(launch.creator, creatorFee);
+        _sendNative(treasury, platformFee);
 
-        emit Trade(launchId, msg.sender, true, netValue, tokenOut, fee);
+        emit FeesDistributed(launch.token, launch.creator, creatorFee, platformFee);
+        emit Trade(launchId, msg.sender, true, tokenOut, msg.value, _currentPrice(launch), block.timestamp);
         _graduateIfReady(launchId, launch);
     }
 
@@ -224,19 +255,23 @@ contract DOXALaunchpad {
         if (tokenIn == 0) revert EmptyValue();
 
         uint256 grossValue = _quoteSell(launch, tokenIn);
-        uint256 fee = (grossValue * feeBps) / BPS;
+        uint256 fee = (grossValue * FEE_BPS) / BPS;
+        uint256 creatorFee = (grossValue * CREATOR_FEE_BPS) / BPS;
+        uint256 platformFee = fee - creatorFee;
         nativeOut = grossValue - fee;
         if (grossValue > launch.nativeReserve || nativeOut < minNativeOut) revert Slippage();
 
         DOXAToken(launch.token).transferFrom(msg.sender, address(this), tokenIn);
-        _sendNative(treasury, fee);
-        _sendNative(msg.sender, nativeOut);
         launch.virtualNativeReserve -= grossValue;
         launch.virtualTokenReserve += tokenIn;
         launch.nativeReserve -= grossValue;
         launch.tokenReserve += tokenIn;
+        _sendNative(launch.creator, creatorFee);
+        _sendNative(treasury, platformFee);
+        _sendNative(msg.sender, nativeOut);
 
-        emit Trade(launchId, msg.sender, false, nativeOut, tokenIn, fee);
+        emit FeesDistributed(launch.token, launch.creator, creatorFee, platformFee);
+        emit Trade(launchId, msg.sender, false, tokenIn, grossValue, _currentPrice(launch), block.timestamp);
     }
 
     function quoteBuy(uint256 launchId, uint256 nativeIn) external view returns (uint256) {
@@ -256,14 +291,12 @@ contract DOXALaunchpad {
         uint256 end = offset + limit;
         if (end > launchCount) end = launchCount;
         page = new Launch[](end - offset);
-        for (uint256 i = offset; i < end; i++) {
-            page[i - offset] = launches[i];
-        }
+        for (uint256 i = offset; i < end; i++) page[i - offset] = launches[i];
     }
 
     function progressBps(uint256 launchId) external view returns (uint256) {
         Launch storage launch = _launchView(launchId);
-        if (launch.nativeReserve >= graduationTarget) return BPS;
+        if (launch.nativeReserve >= graduationTarget || launch.tokenReserve == 0) return BPS;
         return (launch.nativeReserve * BPS) / graduationTarget;
     }
 
@@ -271,12 +304,6 @@ contract DOXALaunchpad {
         if (treasury_ == address(0)) revert InvalidAddress();
         treasury = treasury_;
         emit TreasuryUpdated(treasury_);
-    }
-
-    function setFeeBps(uint256 feeBps_) external onlyAdmin {
-        if (feeBps_ > MAX_FEE_BPS) revert InvalidParameter();
-        feeBps = feeBps_;
-        emit FeeUpdated(feeBps_);
     }
 
     function setGraduationTarget(uint256 target_) external onlyAdmin {
@@ -310,10 +337,15 @@ contract DOXALaunchpad {
         return launch.virtualNativeReserve - nextVirtualNative;
     }
 
+    function _currentPrice(Launch storage launch) internal view returns (uint256) {
+        if (launch.virtualTokenReserve == 0) return type(uint256).max;
+        return (launch.virtualNativeReserve * 1 ether) / launch.virtualTokenReserve;
+    }
+
     function _graduateIfReady(uint256 launchId, Launch storage launch) internal {
-        if (launch.nativeReserve >= graduationTarget) {
+        if (launch.nativeReserve >= graduationTarget || launch.tokenReserve == 0) {
             launch.graduated = true;
-            emit Graduated(launchId, launch.token, launch.nativeReserve);
+            emit Graduated(launchId, launch.token, launch.nativeReserve, launch.tokenReserve, DEX_LIQUIDITY_SUPPLY);
         }
     }
 

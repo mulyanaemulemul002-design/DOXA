@@ -2,13 +2,12 @@ import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState 
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ArrowUpRight, ChevronDown, CircleHelp, Copy, Flame, Grid2X2, ImagePlus, ListFilter, Menu, Search, Sparkles, TrendingUp, Users, Wallet, X, Zap } from 'lucide-react'
 import { CandlestickSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
-import { ARC_TESTNET, connectArcWallet, formatWalletAddress, getInjectedProvider, getAccountFromPrivateKey, launchTokenOnArc, readArcWalletBalances, readLaunchesDirect, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, type ArcLaunch, type ArcWalletBalances } from './lib/arc'
+import { ARC_TESTNET, DEPLOY_FEE_USDC, GRADUATION_TARGET_USDC, TOKEN_SUPPLY, aggregateTradesToOHLC, connectArcWallet, formatWalletAddress, getInjectedProvider, getAccountFromPrivateKey, launchTokenOnArc, readLaunchAnalytics, readArcWalletBalances, readLaunchesDirect, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, uploadLaunchMetadata, resolveIpfsUri, type ArcAnalytics, type ArcLaunch, type ArcWalletBalances, type OHLCBucket } from './lib/arc'
 
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
-type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number; priceSeries: number[] }
+type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; metadataURI: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number; priceSeries: number[] }
 
-const GRADUATION_TARGET = 10000
-const TOKEN_SUPPLY = 1_000_000_000
+const GRADUATION_TARGET = GRADUATION_TARGET_USDC
 
 const visualVariants = ['cat', 'ghost', 'toad', 'baby', 'night', 'pigeon']
 
@@ -29,6 +28,7 @@ function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
     name: launch.name,
     ticker: launch.symbol,
     description: launch.description,
+    metadataURI: launch.metadataURI,
     progress,
     marketCap,
     change,
@@ -179,7 +179,7 @@ function seriesToSvgPath(series: number[]): string {
   }).join(' ')
 }
 
-function TradingViewMarketChart({ token, large = false }: { token: Token; large?: boolean }) {
+function TradingViewMarketChart({ token, large = false, ohlc = [] }: { token: Token; large?: boolean; ohlc?: OHLCBucket[] }) {
   const [mode, setMode] = useState<ChartMode>('trend')
   const [metric, setMetric] = useState<ChartMetric>('price')
   const chartRef = useRef<HTMLDivElement>(null)
@@ -195,28 +195,14 @@ function TradingViewMarketChart({ token, large = false }: { token: Token; large?
       timeScale: { borderColor: 'rgba(120, 150, 130, .22)', timeVisible: true, secondsVisible: false, rightOffset: 2 },
       crosshair: { vertLine: { color: 'rgba(190, 255, 215, .45)', width: 1, style: 2 }, horzLine: { color: 'rgba(190, 255, 215, .45)', width: 1, style: 2 } },
     })
-    const source = token.priceSeries.length > 1 ? token.priceSeries : [token.price || 0, token.price || 0]
     const scale = metric === 'price' ? 1 : TOKEN_SUPPLY
-    const bucketCount = Math.min(14, source.length)
-    const bucketSize = Math.max(1, Math.floor(source.length / bucketCount))
-    const totalBuckets = Math.ceil(source.length / bucketSize)
+    const source = token.priceSeries.length > 1 ? token.priceSeries : [token.price || 0, token.price || 0]
     const nowSec = Math.floor(Date.now() / 1000)
-    const startSec = nowSec - token.createdMinutes * 60
-    const step = Math.max(60, Math.floor((nowSec - startSec) / Math.max(1, totalBuckets)))
-    const candleData: Array<{ time: Time; open: number; high: number; low: number; close: number }> = []
-    let bucketIndex = 0
-    for (let i = 0; i < source.length; i += bucketSize) {
-      const window = source.slice(i, i + bucketSize)
-      if (window.length === 0) continue
-      candleData.push({
-        time: (startSec + bucketIndex * step) as Time,
-        open: window[0] * scale,
-        high: Math.max(...window) * scale,
-        low: Math.min(...window) * scale,
-        close: window[window.length - 1] * scale,
-      })
-      bucketIndex++
-    }
+    const fallbackStep = Math.max(60, Math.floor((token.createdMinutes * 60) / Math.max(1, source.length)))
+    const fallbackStart = nowSec - token.createdMinutes * 60
+    const candleData: Array<{ time: Time; open: number; high: number; low: number; close: number }> = ohlc.length
+      ? ohlc.map((candle) => ({ time: candle.time as Time, open: candle.open * scale, high: candle.high * scale, low: candle.low * scale, close: candle.close * scale }))
+      : source.map((value, index) => ({ time: (fallbackStart + index * fallbackStep) as Time, open: value * scale, high: value * scale, low: value * scale, close: value * scale }))
     const series: ISeriesApi<'Candlestick'> = chart.addSeries(CandlestickSeries, {
       upColor: '#46d889', downColor: '#e07f76', borderVisible: false, wickUpColor: '#46d889', wickDownColor: '#e07f76',
       priceFormat: { type: 'price', precision: metric === 'price' ? 9 : 2, minMove: metric === 'price' ? 1e-9 : 0.01 },
@@ -224,7 +210,7 @@ function TradingViewMarketChart({ token, large = false }: { token: Token; large?
     series.setData(candleData)
     chart.timeScale().fitContent()
     return () => chart.remove()
-  }, [large, mode, metric, token.id, token.priceSeries, token.price, token.createdMinutes])
+  }, [large, mode, metric, token.id, token.priceSeries, token.price, token.createdMinutes, ohlc])
 
   const toolbar = large && <div className="market-chart-toolbar"><div className="chart-mode-toggle" role="group" aria-label="Chart type"><button className={mode === 'trend' ? 'active' : ''} onClick={() => setMode('trend')} type="button">Trend</button><button className={mode === 'candle' ? 'active' : ''} onClick={() => setMode('candle')} type="button">Candles</button></div><div className="chart-metric-toggle" role="group" aria-label="Chart metric"><button className={metric === 'price' ? 'active' : ''} onClick={() => setMetric('price')} type="button">Price</button><button className={metric === 'marketCap' ? 'active' : ''} onClick={() => setMetric('marketCap')} type="button">Market cap</button></div></div>
   if (mode === 'candle') return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''} candles-active`} aria-label={`${token.name} candlestick chart`}>{toolbar}<div className="tradingview-chart" ref={chartRef} /></div>
@@ -277,6 +263,10 @@ function Create({ wallet, onConnect }: { wallet: WalletState; onConnect: () => v
   const [description, setDescription] = useState('')
   const [imageUrl, setImageUrl] = useState('')
   const [imageName, setImageName] = useState('')
+  const [imageFile, setImageFile] = useState<File | null>(null)
+  const [website, setWebsite] = useState('')
+  const [twitter, setTwitter] = useState('')
+  const [telegram, setTelegram] = useState('')
   const [launched, setLaunched] = useState(false)
   const [launchHash, setLaunchHash] = useState<string | null>(null)
   const [launchError, setLaunchError] = useState<string | null>(null)
@@ -286,6 +276,7 @@ function Create({ wallet, onConnect }: { wallet: WalletState; onConnect: () => v
     const file = event.target.files?.[0]
     if (!file) return
     setImageName(file.name)
+    setImageFile(file)
     const reader = new FileReader()
     reader.onload = () => {
       if (typeof reader.result === 'string') setImageUrl(reader.result)
@@ -299,9 +290,19 @@ function Create({ wallet, onConnect }: { wallet: WalletState; onConnect: () => v
       onConnect()
       return
     }
+    if (!imageFile) {
+      setLaunchError('Choose a token image so it can be stored on IPFS.')
+      return
+    }
     setIsLaunching(true)
     try {
-      const hash = await launchTokenOnArc(wallet.account, name.trim(), ticker.trim(), description.trim())
+      const metadataURI = await uploadLaunchMetadata(imageFile, {
+        name: name.trim(),
+        symbol: ticker.trim(),
+        description: description.trim(),
+        socials: { website: website.trim(), twitter: twitter.trim(), telegram: telegram.trim() },
+      })
+      const hash = await launchTokenOnArc(wallet.account, name.trim(), ticker.trim(), description.trim(), metadataURI)
       setLaunchHash(hash)
       setLaunched(true)
     } catch (error) {
@@ -310,7 +311,7 @@ function Create({ wallet, onConnect }: { wallet: WalletState; onConnect: () => v
       setIsLaunching(false)
     }
   }
-  return <main className="container page"><div className="page-intro"><div><div className="eyebrow">Start something</div><h1>Launch a token<br /><span>people remember.</span></h1><p>Every great meme starts with a name and a little conviction. The rest is up to the crowd.</p></div><div className="mock-note"><CircleHelp size={16} /><span>On-chain launch / wallet signature required</span></div></div><div className="create-layout"><form className="form-panel" onSubmit={handleSubmit}><div className="panel-heading"><span>01</span><h2>Token details</h2></div><label>Token name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Keyboard Cat" maxLength={28} required /></label><label>Ticker<span className="input-prefix">$ <input value={ticker} onChange={(event) => setTicker(event.target.value.toUpperCase().replace(/[^A-Z]/g, ''))} placeholder="KEYS" maxLength={8} required /></span></label><label>What’s the story?<textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Give the internet a reason to care..." maxLength={120} required /></label><label>Token image<input ref={fileInputRef} style={{ display: 'none' }} type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={handleImageChange} /><div className="upload-box"><ImagePlus size={20} /><div><b>{imageName || 'Drop an image here'}</b><small>PNG, JPG, GIF or WEBP / 4MB max</small></div><button type="button" onClick={() => fileInputRef.current?.click()}>{imageName ? 'Change' : 'Browse'}</button></div></label><div className="optional-row"><label>Website <span className="field-optional">Optional</span><input type="url" placeholder="https://" /></label><label>X / Twitter <span className="field-optional">Optional</span><input placeholder="@handle" /></label><label>Telegram <span className="field-optional">Optional</span><input placeholder="@channel" /></label></div><button className="button primary launch-button" type="submit" disabled={isLaunching}>{isLaunching ? 'Waiting for wallet...' : launched ? 'Transaction sent' : wallet.account ? 'Launch on ARC' : 'Connect wallet to launch'} <ArrowUpRight size={16} /></button>{launchHash && <p className="form-success">Transaction sent: <a href={`${ARC_TESTNET.explorerUrl}/tx/${launchHash}`} target="_blank" rel="noreferrer">{formatWalletAddress(launchHash)}</a></p>}{launchError && <p className="form-error" role="alert">{launchError}</p>}<p className="form-footnote">Your wallet will ask you to confirm the `createLaunch` transaction on Arc Testnet.</p></form><Preview name={name} ticker={ticker} description={description} imageUrl={imageUrl} /></div></main>
+  return <main className="container page"><div className="page-intro"><div><div className="eyebrow">Start something</div><h1>Launch a token<br /><span>people remember.</span></h1><p>Every great meme starts with a name and a little conviction. The rest is up to the crowd.</p></div><div className="mock-note"><CircleHelp size={16} /><span>On-chain launch / {DEPLOY_FEE_USDC} USDC deploy fee</span></div></div><div className="create-layout"><form className="form-panel" onSubmit={handleSubmit}><div className="panel-heading"><span>01</span><h2>Token details</h2></div><label>Token name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Keyboard Cat" maxLength={28} required /></label><label>Ticker<span className="input-prefix">$ <input value={ticker} onChange={(event) => setTicker(event.target.value.toUpperCase().replace(/[^A-Z]/g, ''))} placeholder="KEYS" maxLength={8} required /></span></label><label>What’s the story?<textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Give the internet a reason to care..." maxLength={120} required /></label><label>Token image<input ref={fileInputRef} style={{ display: 'none' }} type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={handleImageChange} /><div className="upload-box"><ImagePlus size={20} /><div><b>{imageName || 'Drop an image here'}</b><small>PNG, JPG, GIF or WEBP / 4MB max · stored on IPFS</small></div><button type="button" onClick={() => fileInputRef.current?.click()}>{imageName ? 'Change' : 'Browse'}</button></div></label><div className="optional-row"><label>Website <span className="field-optional">Optional</span><input type="url" value={website} onChange={(event) => setWebsite(event.target.value)} placeholder="https://" /></label><label>X / Twitter <span className="field-optional">Optional</span><input value={twitter} onChange={(event) => setTwitter(event.target.value)} placeholder="@handle" /></label><label>Telegram <span className="field-optional">Optional</span><input value={telegram} onChange={(event) => setTelegram(event.target.value)} placeholder="@channel" /></label></div><button className="button primary launch-button" type="submit" disabled={isLaunching}>{isLaunching ? 'Uploading & waiting...' : launched ? 'Transaction sent' : wallet.account ? 'Launch on ARC' : 'Connect wallet to launch'} <ArrowUpRight size={16} /></button>{launchHash && <p className="form-success">Transaction sent: <a href={`${ARC_TESTNET.explorerUrl}/tx/${launchHash}`} target="_blank" rel="noreferrer">{formatWalletAddress(launchHash)}</a></p>}{launchError && <p className="form-error" role="alert">{launchError}</p>}<p className="form-footnote">Your wallet will confirm the {DEPLOY_FEE_USDC} USDC create fee and `createLaunch` transaction on Arc Testnet.</p></form><Preview name={name} ticker={ticker} description={description} imageUrl={imageUrl} /></div></main>
 }
 
 function Preview({ name, ticker, description, imageUrl }: { name: string; ticker: string; description: string; imageUrl: string }) {
@@ -371,6 +372,36 @@ function shortenError(message: string): string {
   const firstLine = message.split('\n')[0].trim()
   if (/user rejected|denied|rejected the request/i.test(message)) return 'Transaction rejected in wallet.'
   return firstLine.length > 140 ? `${firstLine.slice(0, 140)}…` : firstLine
+}
+
+function formatTradeTime(timestamp: bigint): string {
+  if (!timestamp) return '—'
+  return new Date(Number(timestamp) * 1000).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+}
+
+function TokenAnalytics({ token, analytics }: { token: Token; analytics: ArcAnalytics | null }) {
+  const [tab, setTab] = useState<'holders' | 'activity' | 'info'>('holders')
+  if (!analytics) return <div className="holders-card"><div className="small-heading"><h3>On-chain data</h3></div><p className="wallet-placeholder">Indexing holders and activity from Arc events…</p></div>
+  return <div className="holders-card token-analytics-card">
+    <div className="analytics-tabs" role="tablist" aria-label="Token analytics">
+      {(['holders', 'activity', 'info'] as const).map((item) => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item === 'holders' ? `Holders (${analytics.holders.length})` : item === 'activity' ? 'Activity' : 'Token info'}</button>)}
+    </div>
+    {tab === 'holders' && <div className="analytics-list">
+      {analytics.holders.length === 0 ? <p className="wallet-placeholder">No circulating holders yet.</p> : analytics.holders.slice(0, 12).map((holder, index) => <div className="holder-row" key={holder.address}><span className="holder-rank">{String(index + 1).padStart(2, '0')}</span><a href={`${ARC_TESTNET.explorerUrl}/address/${holder.address}`} target="_blank" rel="noreferrer">{formatWalletAddress(holder.address)}</a><b>{holder.share.toFixed(2)}%</b></div>)}
+    </div>}
+    {tab === 'activity' && <div className="analytics-list activity-list">
+      {analytics.trades.length === 0 ? <p className="wallet-placeholder">No trades indexed yet.</p> : [...analytics.trades].reverse().slice(0, 12).map((trade, index) => <div className="activity-row" key={`${trade.transactionHash}-${index}`}><span className={trade.isBuy ? 'activity-buy' : 'activity-sell'}>{trade.isBuy ? 'BUY' : 'SELL'}</span><span><b>{formatWalletAddress(trade.trader)}</b><small>{formatTradeTime(trade.timestamp)}</small></span><strong>{(Number(trade.usdcAmount) / 1e18).toFixed(3)} USDC</strong><a href={`${ARC_TESTNET.explorerUrl}/tx/${trade.transactionHash}`} target="_blank" rel="noreferrer">↗</a></div>)}
+    </div>}
+    {tab === 'info' && <div className="token-info-list">
+      <div><span>Contract</span><button onClick={() => void navigator.clipboard?.writeText(token.tokenAddress)}>{formatWalletAddress(token.tokenAddress)} <Copy size={12} /></button></div>
+      <div><span>Total supply</span><b>{TOKEN_SUPPLY.toLocaleString()} ${token.ticker}</b></div>
+      <div><span>Curve allocation</span><b>78% · 780,000,000 tokens</b></div>
+      <div><span>Created</span><b>{token.created}</b></div>
+      {typeof analytics.metadata?.website === 'string' && <div><span>Website</span><a href={analytics.metadata.website} target="_blank" rel="noreferrer">{analytics.metadata.website}</a></div>}
+      {typeof analytics.metadata?.twitter === 'string' && <div><span>X / Twitter</span><b>{analytics.metadata.twitter}</b></div>}
+      {typeof analytics.metadata?.telegram === 'string' && <div><span>Telegram</span><b>{analytics.metadata.telegram}</b></div>}
+    </div>}
+  </div>
 }
 
 function TradePanel({ token, onConnect, connected, account, onTraded }: { token: Token; onConnect: () => void; connected: boolean; account: string | null; onTraded: () => void }) {
@@ -456,10 +487,31 @@ function Detail({ onConnect, wallet, tokens, onTraded }: { onConnect: () => void
   const { id } = useParams()
   const token = tokens.find((item) => item.id === id) || tokens[0]
   const [copied, setCopied] = useState(false)
+  const [analytics, setAnalytics] = useState<ArcAnalytics | null>(null)
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null)
+  const [refreshingAnalytics, setRefreshingAnalytics] = useState(false)
+  const refreshAnalytics = async () => {
+    if (!token) return
+    setRefreshingAnalytics(true)
+    try {
+      setAnalytics(await readLaunchAnalytics(token.launchId, token.tokenAddress, token.metadataURI))
+      setAnalyticsError(null)
+    } catch (error) {
+      setAnalyticsError(error instanceof Error ? error.message : 'Unable to index token activity.')
+    } finally {
+      setRefreshingAnalytics(false)
+    }
+  }
+  useEffect(() => {
+    setAnalytics(null)
+    void refreshAnalytics()
+  }, [token?.id])
   if (!token) return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><p style={{ marginTop: 40 }}>Loading token…</p></main>
   const copyAddress = () => { void navigator.clipboard?.writeText(token.tokenAddress); setCopied(true); window.setTimeout(() => setCopied(false), 1600) }
   const toGraduation = Math.max(0, GRADUATION_TARGET - token.liquidity)
-  return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><div className="detail-heading"><div className="detail-token"><TokenMark variant={token.visual} large /><div><div className="eyebrow"><StatusBadge status={token.status} /></div><h1>{token.name} <span>${token.ticker}</span></h1><p>{token.description}</p><button className="address" onClick={copyAddress}>{copied ? 'Copied to clipboard' : `ARC / ${formatWalletAddress(token.tokenAddress)}`} <Copy size={13} /></button></div></div><div className="detail-actions"><a className="icon-button" href={`${ARC_TESTNET.explorerUrl}/address/${token.tokenAddress}`} target="_blank" rel="noreferrer" aria-label="View token on explorer"><ArrowUpRight size={16} /></a><button className="button primary" onClick={onConnect}><Wallet size={15} /> {wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div></div><div className="detail-grid"><div><div className="detail-chart-shell"><TradingViewMarketChart token={token} large /></div><div className="curve-card"><div className="curve-header"><div><span>Bonding curve progress</span><strong>{token.progress.toFixed(1)}%</strong></div><span>{token.progress >= 100 ? 'Graduated' : `${toGraduation.toLocaleString(undefined, { maximumFractionDigits: 0 })} USDC to graduation`}</span></div><div className="curve-track"><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="curve-foot"><span>Liquidity <b>{token.liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</b></span><span>Graduation target <b>{GRADUATION_TARGET.toLocaleString()} USDC</b></span></div></div><MigrationCard status={token.status} /></div><aside><TradePanel token={token} onConnect={onConnect} connected={Boolean(wallet.account)} account={wallet.account} onTraded={onTraded} /><div className="holders-card"><div className="small-heading"><h3>Market</h3></div><div className="holder-row"><span className="holder-rank">01</span><span>Price</span><b>{(token.price || 0).toPrecision(3)} USDC</b></div><div className="holder-row"><span className="holder-rank">02</span><span>Market cap</span><b>${(token.marketCap / 1000).toFixed(2)}K</b></div><div className="holder-row"><span className="holder-rank">03</span><span>Creator</span><b>{formatWalletAddress(token.creator)}</b></div><div className="holder-row"><span className="holder-rank">04</span><span>Change</span><b className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change.toFixed(2)}%</b></div></div></aside></div></main>
+  const ohlc = analytics ? aggregateTradesToOHLC(analytics.trades, 60) : []
+  const metadataImage = typeof analytics?.metadata?.image === 'string' ? resolveIpfsUri(analytics.metadata.image) : ''
+  return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><div className="detail-heading"><div className="detail-token">{metadataImage ? <img className="detail-token-image" src={metadataImage} alt="" /> : <TokenMark variant={token.visual} large />}<div><div className="eyebrow"><StatusBadge status={token.status} /></div><h1>{token.name} <span>${token.ticker}</span></h1><p>{token.description}</p><button className="address" onClick={copyAddress}>{copied ? 'Copied to clipboard' : `ARC / ${formatWalletAddress(token.tokenAddress)}`} <Copy size={13} /></button></div></div><div className="detail-actions"><button className="icon-button" onClick={refreshAnalytics} aria-label="Refresh indexed data">{refreshingAnalytics ? '…' : '↻'}</button><a className="icon-button" href={`${ARC_TESTNET.explorerUrl}/address/${token.tokenAddress}`} target="_blank" rel="noreferrer" aria-label="View token on explorer"><ArrowUpRight size={16} /></a><button className="button primary" onClick={onConnect}><Wallet size={15} /> {wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div></div><div className="detail-grid"><div><div className="detail-chart-shell"><TradingViewMarketChart token={token} large ohlc={ohlc} /></div><div className="curve-card"><div className="curve-header"><div><span>Bonding curve progress</span><strong>{token.progress.toFixed(1)}%</strong></div><span>{token.progress >= 100 ? 'Graduated' : `${toGraduation.toLocaleString(undefined, { maximumFractionDigits: 0 })} USDC to graduation`}</span></div><div className="curve-track"><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="curve-foot"><span>Liquidity <b>{token.liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</b></span><span>Graduation target <b>{GRADUATION_TARGET.toLocaleString()} USDC</b></span></div></div><MigrationCard status={token.status} /><TokenAnalytics token={token} analytics={analytics} />{analyticsError && <p className="form-error" role="alert">{analyticsError}</p>}</div><aside><TradePanel token={token} onConnect={onConnect} connected={Boolean(wallet.account)} account={wallet.account} onTraded={() => { onTraded(); void refreshAnalytics() }} /><div className="holders-card"><div className="small-heading"><h3>Market</h3></div><div className="holder-row"><span className="holder-rank">01</span><span>Price</span><b>{(token.price || 0).toPrecision(3)} USDC</b></div><div className="holder-row"><span className="holder-rank">02</span><span>Market cap</span><b>${(token.marketCap / 1000).toFixed(2)}K</b></div><div className="holder-row"><span className="holder-rank">03</span><span>Creator</span><b>{formatWalletAddress(token.creator)}</b></div><div className="holder-row"><span className="holder-rank">04</span><span>Change</span><b className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change.toFixed(2)}%</b></div></div></aside></div></main>
 }
 
 function MigrationCard({ status }: { status: MigrationStatus }) {
@@ -484,6 +536,7 @@ function AdminPanel({ onRefreshTokens }: { onRefreshTokens: () => void }) {
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
   const [description, setDescription] = useState('')
+  const [createMetadataURI, setCreateMetadataURI] = useState('')
   const [createAddr, setCreateAddr] = useState('')
   const [createHash, setCreateHash] = useState<string | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
@@ -553,13 +606,13 @@ function AdminPanel({ onRefreshTokens }: { onRefreshTokens: () => void }) {
     setCreateHash(null)
     const signer = bots.find((b) => b.address === createAddr) ?? bots[0]
     if (!signer) { setCreateError('Add a bot first.'); return }
-    if (!name.trim() || !ticker.trim() || !description.trim()) {
-      setCreateError('Name, ticker, and description are required.')
+    if (!name.trim() || !ticker.trim() || !description.trim() || !createMetadataURI.trim()) {
+      setCreateError('Name, ticker, description, and an IPFS metadata URI are required.')
       return
     }
     setIsCreating(true)
     try {
-      const hash = await createLaunchWithPrivateKey(signer.privateKey, name.trim(), ticker.trim(), description.trim())
+      const hash = await createLaunchWithPrivateKey(signer.privateKey, name.trim(), ticker.trim(), description.trim(), createMetadataURI.trim())
       setCreateHash(hash)
       void onRefreshTokens()
     } catch (err) {
@@ -652,6 +705,7 @@ function AdminPanel({ onRefreshTokens }: { onRefreshTokens: () => void }) {
       <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>NAME</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Token name" maxLength={28} style={inputStyle} /></label>
       <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>TICKER</span><input value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))} placeholder="TICKER" maxLength={8} style={inputStyle} /></label>
       <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>DESCRIPTION</span><input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description" maxLength={120} style={inputStyle} /></label>
+       <label style={{ display: 'block', marginBottom: 12 }}><span style={{ font: '10px DM Mono', color: 'var(--muted)' }}>IPFS METADATA URI</span><input value={createMetadataURI} onChange={(e) => setCreateMetadataURI(e.target.value)} placeholder="ipfs://..." style={inputStyle} /></label>
       <button className="button primary" onClick={handleCreate} disabled={isCreating} style={{ marginTop: 4 }}>{isCreating ? 'Sending...' : 'Create token'}</button>
       {createHash && <p className="form-success" style={{ marginTop: 10 }}>TX: <a href={`${ARC_TESTNET.explorerUrl}/tx/${createHash}`} target="_blank" rel="noreferrer">{formatWalletAddress(createHash)}</a></p>}
       {createError && <p className="form-error" role="alert" style={{ marginTop: 10 }}>{createError}</p>}

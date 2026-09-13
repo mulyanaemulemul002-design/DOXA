@@ -15,12 +15,10 @@ const artifact = JSON.parse(await readFile(resolve(root, 'contract-artifacts/DOX
 const rpcUrl = process.env.ARC_RPC_URL || 'https://rpc.testnet.arc.io'
 const admin = getAddress(process.env.DOXA_ADMIN || '0x662ddf7d320b229f701e5e628e3ff6dec9c05855')
 const treasury = getAddress(process.env.DOXA_TREASURY || '0x4b1060f52c4af453d02826cd855f4866a6735190')
-const graduationTarget = process.env.DOXA_GRADUATION_TARGET_USDC || '10000'
-const feeBps = BigInt(process.env.DOXA_FEE_BPS || '100')
+const graduationTarget = process.env.DOXA_GRADUATION_TARGET_USDC || '69000'
 const privateKey = process.env.DEPLOYER_PRIVATE_KEY
 
-if (!privateKey) throw new Error('DEPLOYER_PRIVATE_KEY is required in Vercel Environment Variables.')
-if (feeBps > 500n) throw new Error('DOXA_FEE_BPS cannot exceed 500 (5%).')
+if (!privateKey) throw new Error('DEPLOYER_PRIVATE_KEY is required in Replit Secrets.')
 
 const chain = defineChain({
   id: 5042002,
@@ -33,11 +31,11 @@ const account = privateKeyToAccount(privateKey.startsWith('0x') ? privateKey : `
 const publicClient = createPublicClient({ chain, transport: http(rpcUrl) })
 const walletClient = createWalletClient({ account, chain, transport: http(rpcUrl) })
 
-console.log(JSON.stringify({ deployer: account.address, admin, treasury, graduationTarget, feeBps: feeBps.toString(), chainId: chain.id }, null, 2))
+console.log(JSON.stringify({ deployer: account.address, admin, treasury, graduationTarget, chainId: chain.id }, null, 2))
 const hash = await walletClient.deployContract({
   abi: artifact.abi,
   bytecode: artifact.bytecode,
-  args: [admin, treasury, parseUnits(graduationTarget, 18), feeBps],
+  args: [admin, treasury, parseUnits(graduationTarget, 18)],
 })
 console.log(`Deployment transaction: ${hash}`)
 const receipt = await publicClient.waitForTransactionReceipt({ hash })
@@ -53,7 +51,9 @@ await writeFile(resolve(deploymentDirectory, 'arc-testnet.json'), JSON.stringify
   admin,
   treasury,
   graduationTargetUsdc: graduationTarget,
-  feeBps: Number(feeBps),
+  feeBps: 100,
+  creatorFeeBps: 5,
+  deployFeeUsdc: '5',
   transactionHash: receipt.transactionHash,
   blockNumber: receipt.blockNumber.toString(),
   explorerUrl: `https://testnet.arcscan.app/address/${receipt.contractAddress}`,

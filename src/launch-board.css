@@ -97,6 +97,27 @@
 .chart-mode-toggle button,.chart-metric-toggle button{border:0;background:transparent;color:#72867a;font:8px 'DM Mono';letter-spacing:.04em;padding:4px 6px;cursor:pointer}
 .chart-mode-toggle button.active,.chart-metric-toggle button.active{background:#193525;color:#d9f5e4}
 .candle-series{color:currentColor}
+.detail-token-image{width:78px;height:78px;border-radius:18px;object-fit:cover;border:1px solid #466753;background:#15241b}
+.token-analytics-card{padding:0;overflow:hidden}
+.analytics-tabs{display:flex;gap:0;border-bottom:1px solid #26352c}
+.analytics-tabs button{flex:1;border:0;border-bottom:2px solid transparent;background:transparent;color:#77877d;padding:13px 8px;font:10px 'DM Mono';cursor:pointer}
+.analytics-tabs button.active{color:var(--mint);border-bottom-color:var(--mint)}
+.analytics-list,.token-info-list{padding:0 22px}
+.activity-list{padding-top:4px}
+.activity-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:11px 0;border-bottom:1px solid #17231c;font:10px 'DM Mono'}
+.activity-row:last-child{border-bottom:0}
+.activity-row>span:nth-child(2){display:flex;flex-direction:column;gap:4px;min-width:0}
+.activity-row small{color:#62746a;font-size:8px}
+.activity-row strong{font-weight:400;color:#dce8df;white-space:nowrap}
+.activity-row a{color:var(--mint)}
+.activity-buy,.activity-sell{font-size:8px;padding:4px 5px;border:1px solid currentColor}
+.activity-buy{color:var(--market-positive)}
+.activity-sell{color:var(--market-negative)}
+.token-info-list>div{display:flex;justify-content:space-between;gap:14px;padding:12px 0;border-bottom:1px solid #17231c;font:10px 'DM Mono'}
+.token-info-list>div:last-child{border-bottom:0}
+.token-info-list span{color:#6e8075}
+.token-info-list b,.token-info-list a,.token-info-list button{max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dce8df;font:10px 'DM Mono';font-weight:400;background:none;border:0;padding:0;text-align:right}
+.token-info-list a{color:var(--mint)}
 .candle line{stroke:currentColor;stroke-width:1.15;vector-effect:non-scaling-stroke}
 .candle rect{fill:currentColor}
 .candle.down{color:var(--market-negative)}

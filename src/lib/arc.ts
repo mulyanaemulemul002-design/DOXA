@@ -16,6 +16,10 @@ export const ARC_TESTNET = {
 } as const
 
 export const DOXA_LAUNCHPAD_ADDRESS = '0x1fbaaf6fb624d975e89c6e12313a161c38c15904' as const
+export const DEPLOY_FEE_USDC = 5
+export const TOKEN_SUPPLY = 1_000_000_000
+export const BONDING_CURVE_SUPPLY = 780_000_000
+export const GRADUATION_TARGET_USDC = 69_000
 
 type RequestArguments = {
   method: string
@@ -44,6 +48,7 @@ export type ArcLaunch = {
   name: string
   symbol: string
   description: string
+  metadataURI: string
   virtualNativeReserve: bigint
   virtualTokenReserve: bigint
   nativeReserve: bigint
@@ -56,11 +61,12 @@ const launchpadAbi = [
   {
     type: 'function',
     name: 'createLaunch',
-    stateMutability: 'nonpayable',
+    stateMutability: 'payable',
     inputs: [
       { name: 'name_', type: 'string' },
       { name: 'symbol_', type: 'string' },
       { name: 'description_', type: 'string' },
+      { name: 'metadataURI_', type: 'string' },
     ],
     outputs: [
       { name: 'launchId', type: 'uint256' },
@@ -76,6 +82,13 @@ const launchpadAbi = [
       { name: 'minTokenOut', type: 'uint256' },
     ],
     outputs: [{ name: 'tokenOut', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'DEPLOY_FEE',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
   },
   {
     type: 'function',
@@ -139,6 +152,7 @@ const launchpadAbi = [
         { name: 'name', type: 'string' },
         { name: 'symbol', type: 'string' },
         { name: 'description', type: 'string' },
+        { name: 'metadataURI', type: 'string' },
         { name: 'virtualNativeReserve', type: 'uint256' },
         { name: 'virtualTokenReserve', type: 'uint256' },
         { name: 'nativeReserve', type: 'uint256' },
@@ -149,6 +163,56 @@ const launchpadAbi = [
     }],
   },
 ] as const
+
+const transferEvent = {
+  type: 'event',
+  name: 'Transfer',
+  anonymous: false,
+  inputs: [
+    { indexed: true, name: 'from', type: 'address' },
+    { indexed: true, name: 'to', type: 'address' },
+    { indexed: false, name: 'value', type: 'uint256' },
+  ],
+} as const
+
+const tradeEvent = {
+  type: 'event',
+  name: 'Trade',
+  anonymous: false,
+  inputs: [
+    { indexed: true, name: 'launchId', type: 'uint256' },
+    { indexed: true, name: 'trader', type: 'address' },
+    { indexed: true, name: 'isBuy', type: 'bool' },
+    { indexed: false, name: 'tokenAmount', type: 'uint256' },
+    { indexed: false, name: 'usdcAmount', type: 'uint256' },
+    { indexed: false, name: 'price', type: 'uint256' },
+    { indexed: false, name: 'timestamp', type: 'uint256' },
+  ],
+} as const
+
+export type ArcTrade = {
+  launchId: number
+  trader: string
+  isBuy: boolean
+  tokenAmount: bigint
+  usdcAmount: bigint
+  price: bigint
+  timestamp: bigint
+  transactionHash: string
+  blockNumber: bigint
+}
+
+export type ArcHolder = {
+  address: string
+  balance: bigint
+  share: number
+}
+
+export type ArcAnalytics = {
+  trades: ArcTrade[]
+  holders: ArcHolder[]
+  metadata: Record<string, unknown> | null
+}
 
 const tokenAbi = [
   {
@@ -250,7 +314,26 @@ async function switchToArcTestnet(provider: Eip1193Provider): Promise<void> {
         blockExplorerUrls: [ARC_TESTNET.explorerUrl],
       }],
     })
+    await provider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: ARC_TESTNET.chainId }],
+    })
   }
+}
+
+export async function ensureArcNetwork(provider = getConnectedProvider()): Promise<Eip1193Provider> {
+  if (!provider) throw new Error('No wallet connection found.')
+  if ((await getChainId(provider)).toLowerCase() !== ARC_TESTNET.chainId) {
+    try {
+      await switchToArcTestnet(provider)
+    } catch {
+      throw new Error('Wrong network detected. Please switch to ARC Network to continue.')
+    }
+  }
+  if ((await getChainId(provider)).toLowerCase() !== ARC_TESTNET.chainId) {
+    throw new Error('Wrong network detected. Please switch to ARC Network to continue.')
+  }
+  return provider
 }
 
 export async function connectArcWallet(): Promise<ArcWalletConnection> {
@@ -259,9 +342,7 @@ export async function connectArcWallet(): Promise<ArcWalletConnection> {
   const walletConnect = provider as Eip1193Provider & { connect?: () => Promise<void> }
   if (!getInjectedProvider() && walletConnect.connect) await walletConnect.connect()
 
-  if ((await getChainId(provider)).toLowerCase() !== ARC_TESTNET.chainId) {
-    await switchToArcTestnet(provider)
-  }
+  await ensureArcNetwork(provider)
 
   const accounts = await provider.request({ method: 'eth_requestAccounts' })
   const account = Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0] : undefined
@@ -313,17 +394,16 @@ export async function readArcWalletBalances(account: string): Promise<ArcWalletB
   }
 }
 
-export async function launchTokenOnArc(account: string, name: string, symbol: string, description: string): Promise<string> {
-  const provider = getConnectedProvider()
-  if (!provider) throw new Error('No wallet connection found.')
+export async function launchTokenOnArc(account: string, name: string, symbol: string, description: string, metadataURI: string): Promise<string> {
+  const provider = await ensureArcNetwork()
   const data = encodeFunctionData({
     abi: launchpadAbi,
     functionName: 'createLaunch',
-    args: [name, symbol, description],
+    args: [name, symbol, description, metadataURI],
   })
   const hash = await provider.request({
     method: 'eth_sendTransaction',
-    params: [{ from: account, to: DOXA_LAUNCHPAD_ADDRESS, data }],
+    params: [{ from: account, to: DOXA_LAUNCHPAD_ADDRESS, data, value: `0x${(BigInt(DEPLOY_FEE_USDC) * 10n ** 18n).toString(16)}` }],
   })
   if (typeof hash !== 'string') throw new Error('Wallet did not return a transaction hash.')
   return hash
@@ -407,6 +487,150 @@ export async function readLaunchesDirect(): Promise<ArcLaunch[]> {
   return result as unknown as ArcLaunch[]
 }
 
+export function resolveIpfsUri(uri: string): string {
+  if (!uri.startsWith('ipfs://')) return uri
+  return `https://ipfs.io/ipfs/${uri.slice('ipfs://'.length)}`
+}
+
+export async function readLaunchMetadata(uri: string): Promise<Record<string, unknown> | null> {
+  if (!uri) return null
+  try {
+    const response = await fetch(resolveIpfsUri(uri))
+    if (!response.ok) return null
+    const value: unknown = await response.json()
+    return value && typeof value === 'object' ? value as Record<string, unknown> : null
+  } catch {
+    return null
+  }
+}
+
+export async function uploadLaunchMetadata(
+  image: File,
+  metadata: { name: string; symbol: string; description: string; socials: Record<string, string> },
+): Promise<string> {
+  const jwt = import.meta.env.VITE_PINATA_JWT
+  if (!jwt) throw new Error('IPFS upload is not configured. Add VITE_PINATA_JWT before creating a token.')
+  const imageBody = new FormData()
+  imageBody.append('file', image)
+  const imageResponse = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${jwt}` },
+    body: imageBody,
+  })
+  if (!imageResponse.ok) throw new Error('Unable to upload the token image to IPFS.')
+  const imageResult = await imageResponse.json() as { IpfsHash?: string }
+  if (!imageResult.IpfsHash) throw new Error('IPFS did not return an image CID.')
+
+  const jsonResponse = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pinataContent: {
+        ...metadata,
+        image: `ipfs://${imageResult.IpfsHash}`,
+      },
+    }),
+  })
+  if (!jsonResponse.ok) throw new Error('Unable to upload token metadata to IPFS.')
+  const jsonResult = await jsonResponse.json() as { IpfsHash?: string }
+  if (!jsonResult.IpfsHash) throw new Error('IPFS did not return a metadata CID.')
+  return `ipfs://${jsonResult.IpfsHash}`
+}
+
+export async function readLaunchAnalytics(launchId: number, token: string, metadataURI = ''): Promise<ArcAnalytics> {
+  const [tradeLogs, transferLogs, metadata] = await Promise.all([
+    publicClient.getLogs({
+      address: DOXA_LAUNCHPAD_ADDRESS,
+      event: tradeEvent,
+      args: { launchId: BigInt(launchId) },
+      fromBlock: 0n,
+    }),
+    publicClient.getLogs({
+      address: token as Hex,
+      event: transferEvent,
+      fromBlock: 0n,
+    }),
+    readLaunchMetadata(metadataURI),
+  ])
+
+  const trades: ArcTrade[] = tradeLogs.map((log) => {
+    const args = log.args as {
+      launchId?: bigint
+      trader?: string
+      isBuy?: boolean
+      tokenAmount?: bigint
+      usdcAmount?: bigint
+      price?: bigint
+      timestamp?: bigint
+    }
+    return {
+      launchId: Number(args.launchId ?? launchId),
+      trader: args.trader ?? '',
+      isBuy: Boolean(args.isBuy),
+      tokenAmount: args.tokenAmount ?? 0n,
+      usdcAmount: args.usdcAmount ?? 0n,
+      price: args.price ?? 0n,
+      timestamp: args.timestamp ?? 0n,
+      transactionHash: log.transactionHash ?? '',
+      blockNumber: log.blockNumber ?? 0n,
+    }
+  }).sort((a, b) => Number(a.timestamp - b.timestamp))
+
+  const balances = new Map<string, bigint>()
+  for (const log of transferLogs) {
+    const args = log.args as { from?: string; to?: string; value?: bigint }
+    const value = args.value ?? 0n
+    const from = (args.from ?? '').toLowerCase()
+    const to = (args.to ?? '').toLowerCase()
+    if (from && from !== '0x0000000000000000000000000000000000000000') {
+      balances.set(from, (balances.get(from) ?? 0n) - value)
+    }
+    if (to) balances.set(to, (balances.get(to) ?? 0n) + value)
+  }
+
+  const supply = BigInt(TOKEN_SUPPLY) * 10n ** 18n
+  const holders = [...balances.entries()]
+    .filter(([address, balance]) => balance > 0n && address !== DOXA_LAUNCHPAD_ADDRESS.toLowerCase())
+    .map(([address, balance]) => ({
+      address,
+      balance,
+      share: Number((balance * 10000n) / supply) / 100,
+    }))
+    .sort((a, b) => (a.balance > b.balance ? -1 : a.balance < b.balance ? 1 : 0))
+
+  return { trades, holders, metadata }
+}
+
+export type OHLCBucket = {
+  time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+export function aggregateTradesToOHLC(trades: ArcTrade[], intervalSeconds = 60): OHLCBucket[] {
+  const buckets = new Map<number, OHLCBucket>()
+  for (const trade of [...trades].sort((a, b) => Number(a.timestamp - b.timestamp))) {
+    const timestamp = Number(trade.timestamp)
+    if (!timestamp) continue
+    const time = Math.floor(timestamp / intervalSeconds) * intervalSeconds
+    const price = Number(trade.price) / 1e18
+    const volume = Number(trade.usdcAmount) / 1e18
+    const bucket = buckets.get(time)
+    if (!bucket) {
+      buckets.set(time, { time, open: price, high: price, low: price, close: price, volume })
+    } else {
+      bucket.high = Math.max(bucket.high, price)
+      bucket.low = Math.min(bucket.low, price)
+      bucket.close = price
+      bucket.volume += volume
+    }
+  }
+  return [...buckets.values()].sort((a, b) => a.time - b.time)
+}
+
 export async function readQuoteBuy(launchId: number, nativeIn: bigint): Promise<bigint> {
   const result = await publicClient.readContract({
     address: DOXA_LAUNCHPAD_ADDRESS,
@@ -467,8 +691,7 @@ export async function waitForArcTx(hash: string): Promise<void> {
 // --- Connected-wallet signed trades (buy / sell) ---
 
 export async function buyOnArc(account: string, launchId: number, nativeIn: bigint, minTokenOut: bigint = 0n): Promise<string> {
-  const provider = getConnectedProvider()
-  if (!provider) throw new Error('No wallet connection found.')
+  const provider = await ensureArcNetwork()
   const data = encodeFunctionData({ abi: launchpadAbi, functionName: 'buy', args: [BigInt(launchId), minTokenOut] })
   const hash = await provider.request({
     method: 'eth_sendTransaction',
@@ -479,8 +702,7 @@ export async function buyOnArc(account: string, launchId: number, nativeIn: bigi
 }
 
 export async function sellOnArc(account: string, launchId: number, token: string, tokenIn: bigint, minNativeOut: bigint = 0n): Promise<string> {
-  const provider = getConnectedProvider()
-  if (!provider) throw new Error('No wallet connection found.')
+  const provider = await ensureArcNetwork()
 
   // The launchpad pulls tokens via transferFrom, so ensure it is approved first.
   const allowance = (await publicClient.readContract({
@@ -491,6 +713,7 @@ export async function sellOnArc(account: string, launchId: number, token: string
   })) as bigint
   if (allowance < tokenIn) {
     const approveData = encodeFunctionData({ abi: tokenAbi, functionName: 'approve', args: [DOXA_LAUNCHPAD_ADDRESS, tokenIn] })
+    await ensureArcNetwork(provider)
     const approveHash = await provider.request({
       method: 'eth_sendTransaction',
       params: [{ from: account, to: token, data: approveData }],
@@ -498,6 +721,7 @@ export async function sellOnArc(account: string, launchId: number, token: string
     if (typeof approveHash === 'string') await publicClient.waitForTransactionReceipt({ hash: approveHash as Hex })
   }
 
+  await ensureArcNetwork(provider)
   const data = encodeFunctionData({ abi: launchpadAbi, functionName: 'sell', args: [BigInt(launchId), tokenIn, minNativeOut] })
   const hash = await provider.request({
     method: 'eth_sendTransaction',
@@ -538,6 +762,7 @@ export async function createLaunchWithPrivateKey(
   name: string,
   symbol: string,
   description: string,
+  metadataURI: string,
 ): Promise<string> {
   const account = getPrivateKeyAccount(privateKey)
   const client = createWalletClient({
@@ -554,7 +779,8 @@ export async function createLaunchWithPrivateKey(
     address: DOXA_LAUNCHPAD_ADDRESS,
     abi: launchpadAbi,
     functionName: 'createLaunch',
-    args: [name, symbol, description],
+    args: [name, symbol, description, metadataURI],
+    value: BigInt(DEPLOY_FEE_USDC) * 10n ** 18n,
     account,
     chain: undefined,
   })
