@@ -2,7 +2,9 @@ import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState 
 import { Link, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { ArrowUpRight, ChevronDown, CircleHelp, Copy, Flame, Grid2X2, ImagePlus, ListFilter, Menu, Search, Sparkles, TrendingUp, Users, Wallet, X, Zap } from 'lucide-react'
 import { CandlestickSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts'
-import { ARC_TESTNET, DEPLOY_FEE_USDC, GRADUATION_TARGET_USDC, TOKEN_SUPPLY, aggregateTradesToOHLC, connectArcWallet, formatWalletAddress, getInjectedProvider, getAccountFromPrivateKey, launchTokenOnArc, readLaunchAnalytics, readArcWalletBalances, readLaunchesDirect, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, uploadLaunchMetadata, resolveIpfsUri, type ArcAnalytics, type ArcLaunch, type ArcWalletBalances, type OHLCBucket } from './lib/arc'
+import { useAppKit, useAppKitAccount, useAppKitProvider } from '@reown/appkit/react'
+import { ARC_TESTNET, DEPLOY_FEE_USDC, GRADUATION_TARGET_USDC, TOKEN_SUPPLY, aggregateTradesToOHLC, formatWalletAddress, getAccountFromPrivateKey, launchTokenOnArc, readLaunchAnalytics, readArcWalletBalances, readLaunchesDirect, readNativeBalanceDirect, readTokenBalanceDirect, readQuoteBuy, readQuoteSell, buyOnArc, sellOnArc, waitForArcTx, parseUsdc, parseToken, buildCurvePriceSeries, createLaunchWithPrivateKey, buyWithPrivateKey, uploadLaunchMetadata, resolveIpfsUri, setArcWalletProvider, readLiveTapeEvents, type ArcAnalytics, type ArcLaunch, type ArcTapeEvent, type ArcWalletBalances, type Eip1193Provider, type OHLCBucket } from './lib/arc'
+import { REOWN_PROJECT_ID } from './lib/reown'
 
 type MigrationStatus = 'active' | 'graduating' | 'migrated'
 type Token = { id: string; launchId: number; tokenAddress: string; name: string; ticker: string; description: string; metadataURI: string; progress: number; marketCap: number; change: number; price: number; holders: number; volume: number; liquidity: number; creator: string; status: MigrationStatus; visual: string; created: string; createdMinutes: number; priceSeries: number[] }
@@ -80,9 +82,17 @@ type WalletState = {
   error: string | null
 }
 
-function useArcWallet() {
+function useFallbackWallet() {
   const [wallet, setWallet] = useState<WalletState>({ account: null, balances: null, error: null })
-  const [isConnecting, setIsConnecting] = useState(false)
+  const connect = () => setWallet((current) => ({ ...current, error: 'Wallet connection is not configured. Add VITE_REOWN_PROJECT_ID to enable Reown AppKit.' }))
+  return { wallet, connect, isConnecting: false }
+}
+
+function useReownWallet() {
+  const { address } = useAppKitAccount({ namespace: 'eip155' })
+  const { walletProvider } = useAppKitProvider<Eip1193Provider>('eip155')
+  const { open } = useAppKit()
+  const [wallet, setWallet] = useState<WalletState>({ account: null, balances: null, error: null })
 
   const refreshBalances = async (account: string) => {
     try {
@@ -93,24 +103,22 @@ function useArcWallet() {
     }
   }
 
-  const connect = async () => {
-    setIsConnecting(true)
-    setWallet((current) => ({ ...current, error: null }))
-    try {
-      const connection = await connectArcWallet()
-      setWallet({ account: connection.account, balances: null, error: null })
-      await refreshBalances(connection.account)
-    } catch (error) {
-      setWallet((current) => ({ ...current, error: error instanceof Error ? error.message : 'Unable to connect wallet.' }))
-    } finally {
-      setIsConnecting(false)
-    }
-  }
+  useEffect(() => {
+    setArcWalletProvider(walletProvider)
+  }, [walletProvider])
 
   useEffect(() => {
-    const provider = getInjectedProvider()
-    if (!provider) return
+    if (!address) {
+      setWallet({ account: null, balances: null, error: null })
+      return
+    }
+    setWallet((current) => ({ ...current, account: address, error: null }))
+    void refreshBalances(address)
+  }, [address])
 
+  useEffect(() => {
+    const provider = walletProvider
+    if (!provider) return
     const handleAccountsChanged = (...args: unknown[]) => {
       const accounts = args[0]
       const account = Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0] : null
@@ -139,9 +147,14 @@ function useArcWallet() {
       provider.removeListener?.('accountsChanged', handleAccountsChanged)
       provider.removeListener?.('chainChanged', handleChainChanged)
     }
-  }, [])
+  }, [walletProvider])
 
-  return { wallet, connect, isConnecting }
+  const connect = () => {
+    setWallet((current) => ({ ...current, error: null }))
+    void open({ view: 'Connect', namespace: 'eip155' })
+  }
+
+  return { wallet, connect, isConnecting: false }
 }
 
 function Logo() {

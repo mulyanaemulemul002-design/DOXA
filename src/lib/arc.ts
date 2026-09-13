@@ -20,6 +20,8 @@ export const DEPLOY_FEE_USDC = 5
 export const TOKEN_SUPPLY = 1_000_000_000
 export const BONDING_CURVE_SUPPLY = 780_000_000
 export const GRADUATION_TARGET_USDC = 69_000
+export const TICKER_MIN_USDC_THRESHOLD = 20
+export const TICKER_LARGE_USDC_THRESHOLD = 500
 
 type RequestArguments = {
   method: string
@@ -175,6 +177,19 @@ const transferEvent = {
   ],
 } as const
 
+const graduatedEvent = {
+  type: 'event',
+  name: 'Graduated',
+  anonymous: false,
+  inputs: [
+    { indexed: true, name: 'launchId', type: 'uint256' },
+    { indexed: true, name: 'token', type: 'address' },
+    { indexed: false, name: 'nativeReserve', type: 'uint256' },
+    { indexed: false, name: 'remainingCurveTokens', type: 'uint256' },
+    { indexed: false, name: 'liquidityTokens', type: 'uint256' },
+  ],
+} as const
+
 const tradeEvent = {
   type: 'event',
   name: 'Trade',
@@ -214,6 +229,17 @@ export type ArcAnalytics = {
   metadata: Record<string, unknown> | null
 }
 
+export type ArcTapeEvent = {
+  type: 'BUY' | 'SELL' | 'MIGRATION'
+  tokenName: string
+  ticker: string
+  usdcAmount: bigint
+  wallet: string
+  timestamp: bigint
+  transactionHash: string
+  large: boolean
+}
+
 const tokenAbi = [
   {
     type: 'function',
@@ -248,28 +274,12 @@ export function getInjectedProvider(): Eip1193Provider | undefined {
   return typeof window === 'undefined' ? undefined : window.ethereum
 }
 
-let walletConnectProvider: Eip1193Provider | undefined
+let appKitProvider: Eip1193Provider | undefined
 
-export async function getWalletConnectProvider(): Promise<Eip1193Provider | undefined> {
-  if (typeof window === 'undefined') return undefined
-  const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID
-  if (!projectId) return undefined
-  if (walletConnectProvider) return walletConnectProvider
-
-  const { EthereumProvider } = await import('@walletconnect/ethereum-provider')
-  walletConnectProvider = await EthereumProvider.init({
-    projectId,
-    chains: [ARC_TESTNET.chainIdDecimal],
-    optionalChains: [ARC_TESTNET.chainIdDecimal],
-    showQrModal: true,
-    metadata: {
-      name: 'DOXA',
-      description: 'DOXA token launchpad on Arc Testnet',
-      url: window.location.origin,
-      icons: [`${window.location.origin}/doxa-logo.png`],
-    },
-  }) as unknown as Eip1193Provider
-  return walletConnectProvider
+export function setArcWalletProvider(provider: unknown): void {
+  appKitProvider = provider && typeof provider === 'object' && 'request' in provider
+    ? provider as Eip1193Provider
+    : undefined
 }
 
 function normalizeChainId(value: unknown): string {
@@ -292,7 +302,7 @@ async function getChainId(provider: Eip1193Provider): Promise<string> {
 }
 
 export function getConnectedProvider(): Eip1193Provider | undefined {
-  return getInjectedProvider() ?? walletConnectProvider
+  return appKitProvider ?? getInjectedProvider()
 }
 
 async function switchToArcTestnet(provider: Eip1193Provider): Promise<void> {
@@ -334,21 +344,6 @@ export async function ensureArcNetwork(provider = getConnectedProvider()): Promi
     throw new Error('Wrong network detected. Please switch to ARC Network to continue.')
   }
   return provider
-}
-
-export async function connectArcWallet(): Promise<ArcWalletConnection> {
-  const provider = getInjectedProvider() ?? await getWalletConnectProvider()
-  if (!provider) throw new Error('WalletConnect is not configured. Add VITE_WALLETCONNECT_PROJECT_ID, or install a browser wallet.')
-  const walletConnect = provider as Eip1193Provider & { connect?: () => Promise<void> }
-  if (!getInjectedProvider() && walletConnect.connect) await walletConnect.connect()
-
-  await ensureArcNetwork(provider)
-
-  const accounts = await provider.request({ method: 'eth_requestAccounts' })
-  const account = Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0] : undefined
-  if (!account) throw new Error('The wallet did not return an account.')
-
-  return { account, chainId: await getChainId(provider) }
 }
 
 function formatUnits(value: bigint, decimals: number, maximumFractionDigits = 4): string {
@@ -508,33 +503,62 @@ export async function uploadLaunchMetadata(
   image: File,
   metadata: { name: string; symbol: string; description: string; socials: Record<string, string> },
 ): Promise<string> {
-  const jwt = import.meta.env.VITE_PINATA_JWT
-  if (!jwt) throw new Error('IPFS upload is not configured. Add VITE_PINATA_JWT before creating a token.')
-  const imageBody = new FormData()
-  imageBody.append('file', image)
-  const imageResponse = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+  const body = new FormData()
+  body.append('file', image)
+  body.append('metadata', JSON.stringify(metadata))
+  const response = await fetch('/api/ipfs', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${jwt}` },
-    body: imageBody,
+    body,
   })
-  if (!imageResponse.ok) throw new Error('Unable to upload the token image to IPFS.')
-  const imageResult = await imageResponse.json() as { IpfsHash?: string }
-  if (!imageResult.IpfsHash) throw new Error('IPFS did not return an image CID.')
+  const result = await response.json().catch(() => ({})) as { metadataURI?: string; error?: string }
+  if (!response.ok || !result.metadataURI) {
+    throw new Error(result.error || 'Unable to upload token metadata to IPFS. Configure the server-only PINATA_JWT secret.')
+  }
+  return result.metadataURI
+}
 
-  const jsonResponse = await fetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      pinataContent: {
-        ...metadata,
-        image: `ipfs://${imageResult.IpfsHash}`,
-      },
-    }),
-  })
-  if (!jsonResponse.ok) throw new Error('Unable to upload token metadata to IPFS.')
-  const jsonResult = await jsonResponse.json() as { IpfsHash?: string }
-  if (!jsonResult.IpfsHash) throw new Error('IPFS did not return a metadata CID.')
-  return `ipfs://${jsonResult.IpfsHash}`
+export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTapeEvent[]> {
+  const [tradeLogs, migrationLogs] = await Promise.all([
+    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: tradeEvent, fromBlock: 0n }),
+    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: graduatedEvent, fromBlock: 0n }),
+  ])
+  const byLaunch = new Map(launches.map((launch, index) => [index, launch]))
+  const events: ArcTapeEvent[] = []
+  for (const log of tradeLogs) {
+    const args = log.args as { launchId?: bigint; trader?: string; isBuy?: boolean; usdcAmount?: bigint; timestamp?: bigint }
+    const launch = byLaunch.get(Number(args.launchId ?? -1))
+    if (!launch) continue
+    const usdcAmount = args.usdcAmount ?? 0n
+    events.push({
+      type: args.isBuy ? 'BUY' : 'SELL',
+      tokenName: launch.name,
+      ticker: launch.symbol,
+      usdcAmount,
+      wallet: args.trader ?? '',
+      timestamp: args.timestamp ?? 0n,
+      transactionHash: log.transactionHash ?? '',
+      large: Number(usdcAmount) / 1e18 >= TICKER_LARGE_USDC_THRESHOLD,
+    })
+  }
+  for (const log of migrationLogs) {
+    const args = log.args as { launchId?: bigint; nativeReserve?: bigint }
+    const launch = byLaunch.get(Number(args.launchId ?? -1))
+    if (!launch) continue
+    events.push({
+      type: 'MIGRATION',
+      tokenName: launch.name,
+      ticker: launch.symbol,
+      usdcAmount: args.nativeReserve ?? 0n,
+      wallet: launch.creator,
+      timestamp: BigInt(Math.floor(Date.now() / 1000)),
+      transactionHash: log.transactionHash ?? '',
+      large: true,
+    })
+  }
+  return events
+    .filter((event) => event.type === 'MIGRATION' || Number(event.usdcAmount) / 1e18 >= TICKER_MIN_USDC_THRESHOLD)
+    .sort((a, b) => Number(b.timestamp - a.timestamp))
+    .slice(0, 80)
 }
 
 export async function readLaunchAnalytics(launchId: number, token: string, metadataURI = ''): Promise<ArcAnalytics> {

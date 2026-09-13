@@ -1,0 +1,31 @@
+Make the following fixes/improvements to the DOXA.xyz app:
+
+## 1. Upgrade Wallet Connect Provider to Reown AppKit (latest)
+
+Current wallet connect option list is too limited. Replace/upgrade it with Reown AppKit (formerly WalletConnect/Web3Modal), using the wagmi adapter, to support a much wider range of wallets (injected wallets like MetaMask, OKX Wallet, Coinbase Wallet, Rabby, plus WalletConnect QR for any mobile wallet, and optional email/social login).
+
+- Install: `@reown/appkit`, `@reown/appkit-adapter-wagmi`, `wagmi@^2`, `viem`, `@tanstack/react-query`
+- Get a project ID from Reown Cloud (dashboard.reown.com) — use an env variable `VITE_REOWN_PROJECT_ID`, do not hardcode it
+- Configure `createAppKit` with the WagmiAdapter, include ARC Network as a custom network definition (chainId, RPC URL, native currency = USDC per our setup, block explorer URL)
+- Replace the existing connect-wallet button/modal with AppKit's `useAppKit()` hook and modal — remove the old, more limited wallet connector entirely
+- Preserve the existing network-guard logic (block transactions + prompt switch to ARC if wallet is on the wrong chain) — this must still work identically on top of the new provider, do not regress this fix
+
+## 2. Fix Ticker (BUY / SELL / MIGRATION running text) — Currently Dummy Data
+
+The scrolling ticker currently shows demo/dummy data. Wire it to real on-chain activity:
+- Subscribe to (or poll) real `Buy`, `Sell`, and `Migration`/graduation events from the contract, same event source used for the activity feed and chart
+- Each ticker item shows: event type (BUY/SELL/MIGRATION), token name/ticker, USDC amount, and a truncated wallet address
+- Remove all mock/placeholder ticker data entirely once real data is wired up
+
+## 3. Ticker Filtering — Reduce Noise from Tiny Trades
+
+- Add a minimum USDC threshold constant (start at $20) — BUY and SELL events below this amount are excluded from the ticker (they still count in the activity feed/holders/chart, this filter is ticker-display-only)
+- MIGRATION events are always shown regardless of size — never filter them out
+- Make the threshold an easily adjustable constant (`TICKER_MIN_USDC_THRESHOLD`), not hardcoded inline in multiple places
+- Optional but recommended: visually emphasize large trades (e.g. above $500 USDC) with a distinct style (brighter accent, slightly larger text, or longer display duration), staying within the existing minimal mint-green/black palette
+
+## 4. Security Fix — Move Pinata IPFS Upload Off the Client (Before Production)
+
+Current IPFS metadata upload uses `VITE_PINATA_JWT`, which — because of the `VITE_` prefix — gets bundled into client-side JavaScript and is fully readable by anyone inspecting the site's source in devtools. This exposes the Pinata account's JWT publicly, allowing anyone to abuse it (consume storage quota, upload arbitrary content under this account).
+
+- Create a server-side endpoint (e.g. a small serverless function or backend route) that holds `PINATA_JWT` as a **server-only** secret (no `VITE_` prefix, never exposed to t
