@@ -57,7 +57,20 @@ function useOnChainTokens() {
       setError(null)
       const nextLaunches = await readLaunchesDirect()
       setLaunches(nextLaunches)
-      setTokens(nextLaunches.map(mapLaunchToToken))
+      const mappedTokens = nextLaunches.map(mapLaunchToToken)
+      const enrichedTokens = await Promise.all(mappedTokens.map(async (token) => {
+        try {
+          const analytics = await readLaunchAnalytics(token.launchId, token.tokenAddress, token.metadataURI)
+          const volume = analytics.trades.reduce((total, trade) => total + Number(trade.usdcAmount) / 1e18, 0)
+          const priceSeries = analytics.trades.map((trade) => Number(trade.price) / 1e18).filter((price) => Number.isFinite(price) && price > 0)
+          const firstPrice = priceSeries[0] ?? token.price
+          const latestPrice = priceSeries[priceSeries.length - 1] ?? token.price
+          return { ...token, volume, holders: analytics.holders.length, change: firstPrice > 0 ? ((latestPrice - firstPrice) / firstPrice) * 100 : token.change, priceSeries: priceSeries.length > 1 ? priceSeries : token.priceSeries }
+        } catch {
+          return token
+        }
+      }))
+      setTokens(enrichedTokens)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load on-chain launches.')
       if (!silent) {
@@ -217,7 +230,9 @@ function seriesToSvgPath(series: number[]): string {
   }).join(' ')
 }
 
-function TradingViewMarketChart({ token, large = false, ohlc = [] }: { token: Token; large?: boolean; ohlc?: OHLCBucket[] }) {
+type ChartInterval = 60 | 3600 | 86400
+
+function TradingViewMarketChart({ token, large = false, ohlc = [], interval = 60 }: { token: Token; large?: boolean; ohlc?: OHLCBucket[]; interval?: ChartInterval }) {
   const [mode, setMode] = useState<ChartMode>('trend')
   const [metric, setMetric] = useState<ChartMetric>('price')
   const chartRef = useRef<HTMLDivElement>(null)
@@ -248,7 +263,7 @@ function TradingViewMarketChart({ token, large = false, ohlc = [] }: { token: To
     series.setData(candleData)
     chart.timeScale().fitContent()
     return () => chart.remove()
-  }, [large, mode, metric, token.id, token.priceSeries, token.price, token.createdMinutes, ohlc])
+  }, [large, mode, metric, interval, token.id, token.priceSeries, token.price, token.createdMinutes, ohlc])
 
   const toolbar = large && <div className="market-chart-toolbar"><div className="chart-mode-toggle" role="group" aria-label="Chart type"><button className={mode === 'trend' ? 'active' : ''} onClick={() => setMode('trend')} type="button">Trend</button><button className={mode === 'candle' ? 'active' : ''} onClick={() => setMode('candle')} type="button">Candles</button></div><div className="chart-metric-toggle" role="group" aria-label="Chart metric"><button className={metric === 'price' ? 'active' : ''} onClick={() => setMetric('price')} type="button">Price</button><button className={metric === 'marketCap' ? 'active' : ''} onClick={() => setMetric('marketCap')} type="button">Market cap</button></div></div>
   if (mode === 'candle') return <div className={`market-chart ${large ? 'large' : ''} ${token.change < 0 ? 'down' : ''} candles-active`} aria-label={`${token.name} candlestick chart`}>{toolbar}<div className="tradingview-chart" ref={chartRef} /></div>
@@ -526,6 +541,7 @@ function Detail({ onConnect, wallet, tokens, onTraded }: { onConnect: () => void
   const [analytics, setAnalytics] = useState<ArcAnalytics | null>(null)
   const [analyticsError, setAnalyticsError] = useState<string | null>(null)
   const [refreshingAnalytics, setRefreshingAnalytics] = useState(false)
+  const [chartInterval, setChartInterval] = useState<ChartInterval>(60)
   const refreshAnalytics = async () => {
     if (!token) return
     setRefreshingAnalytics(true)
@@ -545,9 +561,10 @@ function Detail({ onConnect, wallet, tokens, onTraded }: { onConnect: () => void
   if (!token) return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><p style={{ marginTop: 40 }}>Loading token…</p></main>
   const copyAddress = () => { void navigator.clipboard?.writeText(token.tokenAddress); setCopied(true); window.setTimeout(() => setCopied(false), 1600) }
   const toGraduation = Math.max(0, GRADUATION_TARGET - token.liquidity)
-  const ohlc = analytics ? aggregateTradesToOHLC(analytics.trades, 60) : []
+  const ohlc = analytics ? aggregateTradesToOHLC(analytics.trades, chartInterval) : []
   const metadataImage = typeof analytics?.metadata?.image === 'string' ? resolveIpfsUri(analytics.metadata.image) : ''
-  return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><div className="detail-heading"><div className="detail-token">{metadataImage ? <img className="detail-token-image" src={metadataImage} alt="" /> : <TokenMark variant={token.visual} large />}<div><div className="eyebrow"><StatusBadge status={token.status} /></div><h1>{token.name} <span>${token.ticker}</span></h1><p>{token.description}</p><button className="address" onClick={copyAddress}>{copied ? 'Copied to clipboard' : `ARC / ${formatWalletAddress(token.tokenAddress)}`} <Copy size={13} /></button></div></div><div className="detail-actions"><button className="icon-button" onClick={refreshAnalytics} aria-label="Refresh indexed data">{refreshingAnalytics ? '…' : '↻'}</button><a className="icon-button" href={`${ARC_TESTNET.explorerUrl}/address/${token.tokenAddress}`} target="_blank" rel="noreferrer" aria-label="View token on explorer"><ArrowUpRight size={16} /></a><button className="button primary" onClick={onConnect}><Wallet size={15} /> {wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div></div><div className="detail-grid"><div><div className="detail-chart-shell"><TradingViewMarketChart token={token} large ohlc={ohlc} />{analyticsError && <p className="wallet-placeholder" role="status" style={{ margin: '12px 0 0' }}>Chart history is temporarily unavailable. The RPC provider pruned older logs; live token data remains available.</p>}</div><div className="curve-card"><div className="curve-header"><div><span>Bonding curve progress</span><strong>{token.progress.toFixed(1)}%</strong></div><span>{token.progress >= 100 ? 'Graduated' : `${toGraduation.toLocaleString(undefined, { maximumFractionDigits: 0 })} USDC to graduation`}</span></div><div className="curve-track"><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="curve-foot"><span>Liquidity <b>{token.liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</b></span><span>Graduation target <b>{GRADUATION_TARGET.toLocaleString()} USDC</b></span></div></div><MigrationCard status={token.status} /><TokenAnalytics token={token} analytics={analytics} />{analyticsError && <p className="form-error" role="alert">{analyticsError}</p>}</div><aside><TradePanel token={token} onConnect={onConnect} connected={Boolean(wallet.account)} account={wallet.account} onTraded={() => { onTraded(); void refreshAnalytics() }} /><div className="holders-card"><div className="small-heading"><h3>Market</h3></div><div className="holder-row"><span className="holder-rank">01</span><span>Price</span><b>{(token.price || 0).toPrecision(3)} USDC</b></div><div className="holder-row"><span className="holder-rank">02</span><span>Market cap</span><b>${(token.marketCap / 1000).toFixed(2)}K</b></div><div className="holder-row"><span className="holder-rank">03</span><span>Creator</span><b>{formatWalletAddress(token.creator)}</b></div><div className="holder-row"><span className="holder-rank">04</span><span>Change</span><b className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change.toFixed(2)}%</b></div></div></aside></div></main>
+  const intervalLabels: Record<ChartInterval, string> = { 60: '1m', 3600: '1h', 86400: '1D' }
+  return <main className="container page detail-page"><Link to="/" className="back-link">← Back to explore</Link><div className="detail-heading"><div className="detail-token">{metadataImage ? <img className="detail-token-image" src={metadataImage} alt="" /> : <TokenMark variant={token.visual} large />}<div><div className="eyebrow"><StatusBadge status={token.status} /></div><h1>{token.name} <span>${token.ticker}</span></h1><p>{token.description}</p><button className="address" onClick={copyAddress}>{copied ? 'Copied to clipboard' : `ARC / ${formatWalletAddress(token.tokenAddress)}`} <Copy size={13} /></button></div></div><div className="detail-actions"><button className="icon-button" onClick={refreshAnalytics} aria-label="Refresh indexed data">{refreshingAnalytics ? '…' : '↻'}</button><a className="icon-button" href={`${ARC_TESTNET.explorerUrl}/address/${token.tokenAddress}`} target="_blank" rel="noreferrer" aria-label="View token on explorer"><ArrowUpRight size={16} /></a><button className="button primary" onClick={onConnect}><Wallet size={15} /> {wallet.account ? formatWalletAddress(wallet.account) : 'Connect wallet'}</button></div></div><div className="detail-grid"><div><div className="detail-chart-shell"><div className="chart-intervals" role="group" aria-label="Chart timeframe">{([60, 3600, 86400] as ChartInterval[]).map((value) => <button type="button" key={value} className={chartInterval === value ? 'active' : ''} onClick={() => setChartInterval(value)}>{intervalLabels[value]}</button>)}</div><TradingViewMarketChart token={token} large ohlc={ohlc} interval={chartInterval} />{analyticsError && <p className="wallet-placeholder" role="status" style={{ margin: '12px 0 0' }}>{analyticsError}</p>}{analytics && analytics.trades.length === 0 && <p className="wallet-placeholder" role="status" style={{ margin: '12px 0 0' }}>No BUY or SELL trades have been indexed for this token yet.</p>}</div><div className="curve-card"><div className="curve-header"><div><span>Bonding curve progress</span><strong>{token.progress.toFixed(1)}%</strong></div><span>{token.progress >= 100 ? 'Graduated' : `${toGraduation.toLocaleString(undefined, { maximumFractionDigits: 0 })} USDC to graduation`}</span></div><div className="curve-track"><span style={{ width: `${token.progress}%` }} /><i style={{ left: `${Math.min(token.progress, 99.4)}%` }} /></div><div className="curve-foot"><span>Liquidity <b>{token.liquidity.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC</b></span><span>Graduation target <b>{GRADUATION_TARGET.toLocaleString()} USDC</b></span></div></div><MigrationCard status={token.status} /><TokenAnalytics token={token} analytics={analytics} />{analyticsError && <p className="form-error" role="alert">{analyticsError}</p>}</div><aside><TradePanel token={token} onConnect={onConnect} connected={Boolean(wallet.account)} account={wallet.account} onTraded={() => { onTraded(); void refreshAnalytics() }} /><div className="holders-card"><div className="small-heading"><h3>Market</h3></div><div className="holder-row"><span className="holder-rank">01</span><span>Price</span><b>{(token.price || 0).toPrecision(3)} USDC</b></div><div className="holder-row"><span className="holder-rank">02</span><span>Market cap</span><b>${(token.marketCap / 1000).toFixed(2)}K</b></div><div className="holder-row"><span className="holder-rank">03</span><span>Creator</span><b>{formatWalletAddress(token.creator)}</b></div><div className="holder-row"><span className="holder-rank">04</span><span>Change</span><b className={token.change < 0 ? 'negative' : 'positive'}>{token.change > 0 ? '+' : ''}{token.change.toFixed(2)}%</b></div></div></aside></div></main>
 }
 
 function MigrationCard({ status }: { status: MigrationStatus }) {

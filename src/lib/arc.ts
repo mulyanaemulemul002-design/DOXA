@@ -511,11 +511,35 @@ function getStoredDeploymentBlock(token: string): bigint | undefined {
   return undefined
 }
 
-function getKnownLaunchBlocks(launches: ArcLaunch[]): bigint[] {
+  function getKnownLaunchBlocks(launches: ArcLaunch[]): bigint[] {
   return launches.map((launch) => getStoredDeploymentBlock(launch.token)).filter((block): block is bigint => block != null)
-}
+  }
 
-async function rememberDeploymentFromReceipt(hash: string): Promise<void> {
+  async function resolveDeploymentBlock(token: string): Promise<bigint | undefined> {
+  const cached = getStoredDeploymentBlock(token)
+  if (cached != null) return cached
+
+  const latest = await publicClient.getBlockNumber()
+  const retentionWindow = 100_000n
+  const fromBlock = latest > retentionWindow ? latest - retentionWindow : 0n
+  try {
+    const logs = await publicClient.getLogs({
+      address: DOXA_LAUNCHPAD_ADDRESS,
+      event: tokenCreatedEvent,
+      args: { token: token as Hex },
+      fromBlock,
+      toBlock: latest,
+    })
+    const block = logs[0]?.blockNumber
+    if (block != null) rememberDeploymentBlock(token, block)
+    return block
+  } catch (error) {
+    console.warn('[v0] Unable to resolve token deployment block', { token, fromBlock: fromBlock.toString(), latest: latest.toString(), error: error instanceof Error ? error.message : String(error) })
+    return undefined
+  }
+  }
+  
+  async function rememberDeploymentFromReceipt(hash: string): Promise<void> {
   const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as Hex })
   for (const log of receipt.logs) {
     try {
@@ -635,10 +659,10 @@ export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTape
     .slice(0, 80)
 }
 
-export async function readLaunchAnalytics(launchId: number, token: string, metadataURI = ''): Promise<ArcAnalytics> {
-  const fromBlock = getStoredDeploymentBlock(token)
+  export async function readLaunchAnalytics(launchId: number, token: string, metadataURI = ''): Promise<ArcAnalytics> {
+  const fromBlock = await resolveDeploymentBlock(token)
   if (fromBlock == null) {
-    throw new Error('Historical chart data is not available for this token yet. Refresh after its deployment block is cached.')
+  throw new Error('Chart history is unavailable because this token\'s creation block could not be found in the RPC retention window.')
   }
   const [tradeLogs, transferLogs, metadata] = await Promise.all([
     publicClient.getLogs({
