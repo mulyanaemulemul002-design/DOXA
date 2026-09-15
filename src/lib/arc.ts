@@ -218,6 +218,7 @@ export type ArcTrade = {
   timestamp: bigint
   transactionHash: string
   blockNumber: bigint
+  logIndex: number
 }
 
 export type ArcHolder = {
@@ -579,8 +580,11 @@ export async function uploadLaunchMetadata(
   })
   const result = await response.json().catch(() => ({})) as { metadataURI?: string; error?: string }
   if (!response.ok || !result.metadataURI) {
-    throw new Error(result.error || 'Unable to upload token metadata to IPFS. Configure the server-only PINATA_JWT secret.')
+    const detail = result.error || `IPFS upload failed with HTTP ${response.status}.`
+    console.error('[v0] IPFS upload failed', { status: response.status, detail })
+    throw new Error(detail)
   }
+  console.info('[v0] IPFS upload succeeded', { status: response.status })
   return result.metadataURI
 }
 
@@ -671,8 +675,15 @@ export async function readLaunchAnalytics(launchId: number, token: string, metad
       timestamp: args.timestamp ?? 0n,
       transactionHash: log.transactionHash ?? '',
       blockNumber: log.blockNumber ?? 0n,
+      logIndex: log.logIndex ?? 0n,
     }
-  }).sort((a, b) => Number(a.timestamp - b.timestamp))
+  }).sort((a, b) => {
+    const timestampOrder = a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0
+    if (timestampOrder !== 0) return timestampOrder
+    if (a.blockNumber !== b.blockNumber) return a.blockNumber < b.blockNumber ? -1 : 1
+    if (a.logIndex !== b.logIndex) return a.logIndex < b.logIndex ? -1 : 1
+    return a.transactionHash.localeCompare(b.transactionHash)
+  })
 
   const balances = new Map<string, bigint>()
   for (const log of transferLogs) {
@@ -709,22 +720,29 @@ export type OHLCBucket = {
 }
 
 export function aggregateTradesToOHLC(trades: ArcTrade[], intervalSeconds = 60): OHLCBucket[] {
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) return []
   const buckets = new Map<number, OHLCBucket>()
-  for (const trade of [...trades].sort((a, b) => Number(a.timestamp - b.timestamp))) {
+  const orderedTrades = [...trades].sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp < b.timestamp ? -1 : 1
+    if (a.blockNumber !== b.blockNumber) return a.blockNumber < b.blockNumber ? -1 : 1
+    if (a.logIndex !== b.logIndex) return a.logIndex < b.logIndex ? -1 : 1
+    return a.transactionHash.localeCompare(b.transactionHash)
+  })
+  for (const trade of orderedTrades) {
     const timestamp = Number(trade.timestamp)
-    if (!timestamp) continue
-    const time = Math.floor(timestamp / intervalSeconds) * intervalSeconds
     const price = Number(trade.price) / 1e18
     const volume = Number(trade.usdcAmount) / 1e18
+    if (!Number.isFinite(timestamp) || timestamp <= 0 || !Number.isFinite(price) || price <= 0 || !Number.isFinite(volume) || volume < 0) continue
+    const time = Math.floor(timestamp / intervalSeconds) * intervalSeconds
     const bucket = buckets.get(time)
     if (!bucket) {
       buckets.set(time, { time, open: price, high: price, low: price, close: price, volume })
-    } else {
-      bucket.high = Math.max(bucket.high, price)
-      bucket.low = Math.min(bucket.low, price)
-      bucket.close = price
-      bucket.volume += volume
+      continue
     }
+    bucket.high = Math.max(bucket.high, price)
+    bucket.low = Math.min(bucket.low, price)
+    bucket.close = price
+    bucket.volume += volume
   }
   return [...buckets.values()].sort((a, b) => a.time - b.time)
 }
