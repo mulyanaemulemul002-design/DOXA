@@ -56,7 +56,9 @@ export default async function handler(request: IncomingMessage, response: Server
       body: imageBody,
     })
     if (!imageResponse.ok) {
-      writeJson(response, 502, { error: 'Unable to upload the token image to IPFS.' })
+      const detail = await imageResponse.text().catch(() => '')
+      console.error('[ipfs] Pinata image upload failed', imageResponse.status, detail.slice(0, 500))
+      writeJson(response, 502, { error: `Pinata image upload failed (${imageResponse.status}). ${detail.slice(0, 240) || 'Check the PINATA_JWT secret and Pinata permissions.'}` })
       return
     }
     const imageResult = await imageResponse.json() as { IpfsHash?: string }
@@ -73,7 +75,9 @@ export default async function handler(request: IncomingMessage, response: Server
       }),
     })
     if (!jsonResponse.ok) {
-      writeJson(response, 502, { error: 'Unable to upload token metadata to IPFS.' })
+      const detail = await jsonResponse.text().catch(() => '')
+      console.error('[ipfs] Pinata metadata upload failed', jsonResponse.status, detail.slice(0, 500))
+      writeJson(response, 502, { error: `Pinata metadata upload failed (${jsonResponse.status}). ${detail.slice(0, 240) || 'Check the PINATA_JWT secret and Pinata permissions.'}` })
       return
     }
     const jsonResult = await jsonResponse.json() as { IpfsHash?: string }
