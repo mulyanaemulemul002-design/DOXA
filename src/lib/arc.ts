@@ -1,4 +1,4 @@
-import { createWalletClient, createPublicClient, http, decodeFunctionResult, encodeFunctionData, parseUnits, type Hex, type PrivateKeyAccount } from 'viem'
+import { createWalletClient, createPublicClient, http, decodeEventLog, decodeFunctionResult, encodeFunctionData, parseUnits, type Hex, type PrivateKeyAccount } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 
 export const ARC_TESTNET = {
@@ -399,6 +399,7 @@ export async function launchTokenOnArc(account: string, name: string, symbol: st
     params: [{ from: account, to: DOXA_LAUNCHPAD_ADDRESS, data, value: `0x${(BigInt(DEPLOY_FEE_USDC) * 10n ** 18n).toString(16)}` }],
   })
   if (typeof hash !== 'string') throw new Error('Wallet did not return a transaction hash.')
+  await rememberDeploymentFromReceipt(hash)
   return hash
 }
 
@@ -459,6 +460,74 @@ const publicClient = createPublicClient({
   transport: http(ARC_TESTNET.rpcUrl),
 })
 
+const tokenCreatedEvent = {
+  type: 'event',
+  name: 'TokenCreated',
+  anonymous: false,
+  inputs: [
+    { indexed: true, name: 'launchId', type: 'uint256' },
+    { indexed: true, name: 'token', type: 'address' },
+    { indexed: true, name: 'creator', type: 'address' },
+    { indexed: false, name: 'name', type: 'string' },
+    { indexed: false, name: 'symbol', type: 'string' },
+    { indexed: false, name: 'metadataURI', type: 'string' },
+  ],
+} as const
+
+const deploymentBlocks = new Map<string, bigint>()
+const deploymentStorageKey = 'doxa:deployment-blocks'
+
+function rememberDeploymentBlock(token: string, blockNumber: bigint): void {
+  const normalized = token.toLowerCase()
+  deploymentBlocks.set(normalized, blockNumber)
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(deploymentStorageKey) || '{}') as Record<string, string>
+      stored[normalized] = blockNumber.toString()
+      window.localStorage.setItem(deploymentStorageKey, JSON.stringify(stored))
+    } catch {
+      // Caching the block is best effort; the chain remains the source of truth.
+    }
+  }
+}
+
+function getStoredDeploymentBlock(token: string): bigint | undefined {
+  const normalized = token.toLowerCase()
+  const cached = deploymentBlocks.get(normalized)
+  if (cached != null) return cached
+  if (typeof window === 'undefined') return undefined
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(deploymentStorageKey) || '{}') as Record<string, string>
+    const value = stored[normalized]
+    if (value) {
+      const block = BigInt(value)
+      deploymentBlocks.set(normalized, block)
+      return block
+    }
+  } catch {
+    // Ignore invalid client cache.
+  }
+  return undefined
+}
+
+function getKnownLaunchBlocks(launches: ArcLaunch[]): bigint[] {
+  return launches.map((launch) => getStoredDeploymentBlock(launch.token)).filter((block): block is bigint => block != null)
+}
+
+async function rememberDeploymentFromReceipt(hash: string): Promise<void> {
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as Hex })
+  for (const log of receipt.logs) {
+    try {
+      const decoded = decodeEventLog({ abi: [tokenCreatedEvent], data: log.data, topics: log.topics })
+      if (decoded.eventName === 'TokenCreated' && decoded.args && typeof decoded.args === 'object' && 'token' in decoded.args) {
+        rememberDeploymentBlock(String(decoded.args.token), receipt.blockNumber)
+      }
+    } catch {
+      // Receipt logs also contain token transfer events; skip unrelated logs.
+    }
+  }
+}
+
 export async function readLaunchCount(): Promise<number> {
   const result = await publicClient.readContract({
     address: DOXA_LAUNCHPAD_ADDRESS,
@@ -516,9 +585,12 @@ export async function uploadLaunchMetadata(
 }
 
 export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTapeEvent[]> {
+  const knownBlocks = getKnownLaunchBlocks(launches)
+  if (knownBlocks.length === 0) return []
+  const fromBlock = knownBlocks.reduce((lowest, block) => block < lowest ? block : lowest)
   const [tradeLogs, migrationLogs] = await Promise.all([
-    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: tradeEvent, fromBlock: 0n }),
-    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: graduatedEvent, fromBlock: 0n }),
+    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: tradeEvent, fromBlock }),
+    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: graduatedEvent, fromBlock }),
   ])
   const byLaunch = new Map(launches.map((launch, index) => [index, launch]))
   const events: ArcTapeEvent[] = []
@@ -560,17 +632,21 @@ export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTape
 }
 
 export async function readLaunchAnalytics(launchId: number, token: string, metadataURI = ''): Promise<ArcAnalytics> {
+  const fromBlock = getStoredDeploymentBlock(token)
+  if (fromBlock == null) {
+    throw new Error('Historical chart data is not available for this token yet. Refresh after its deployment block is cached.')
+  }
   const [tradeLogs, transferLogs, metadata] = await Promise.all([
     publicClient.getLogs({
       address: DOXA_LAUNCHPAD_ADDRESS,
       event: tradeEvent,
       args: { launchId: BigInt(launchId) },
-      fromBlock: 0n,
+      fromBlock,
     }),
     publicClient.getLogs({
       address: token as Hex,
       event: transferEvent,
-      fromBlock: 0n,
+      fromBlock,
     }),
     readLaunchMetadata(metadataURI),
   ])
@@ -806,6 +882,7 @@ export async function createLaunchWithPrivateKey(
     account,
     chain: undefined,
   })
+  await rememberDeploymentFromReceipt(hash)
   return hash
 }
 
