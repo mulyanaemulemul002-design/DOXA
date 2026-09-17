@@ -664,43 +664,23 @@ export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTape
   if (fromBlock == null) {
   throw new Error('Chart history is unavailable because this token\'s creation block could not be found in the RPC retention window.')
   }
+  const cachedTradeResponse = await fetch(`/api/indexer?launchId=${launchId}&fromBlock=${fromBlock.toString()}`).catch(() => null)
+  const cachedTradePayload = cachedTradeResponse?.ok ? await cachedTradeResponse.json() as { trades?: Array<Record<string, string | number | boolean>> } : null
   const [tradeLogs, transferLogs, metadata] = await Promise.all([
-    publicClient.getLogs({
-      address: DOXA_LAUNCHPAD_ADDRESS,
-      event: tradeEvent,
-      args: { launchId: BigInt(launchId) },
-      fromBlock,
-    }),
-    publicClient.getLogs({
-      address: token as Hex,
-      event: transferEvent,
-      fromBlock,
-    }),
+    cachedTradePayload?.trades ? Promise.resolve([]) : publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: tradeEvent, args: { launchId: BigInt(launchId) }, fromBlock }),
+    publicClient.getLogs({ address: token as Hex, event: transferEvent, fromBlock }),
     readLaunchMetadata(metadataURI),
   ])
 
-  const trades: ArcTrade[] = tradeLogs.map((log) => {
-    const args = log.args as {
-      launchId?: bigint
-      trader?: string
-      isBuy?: boolean
-      tokenAmount?: bigint
-      usdcAmount?: bigint
-      price?: bigint
-      timestamp?: bigint
-    }
-    return {
-      launchId: Number(args.launchId ?? launchId),
-      trader: args.trader ?? '',
-      isBuy: Boolean(args.isBuy),
-      tokenAmount: args.tokenAmount ?? 0n,
-      usdcAmount: args.usdcAmount ?? 0n,
-      price: args.price ?? 0n,
-      timestamp: args.timestamp ?? 0n,
-      transactionHash: log.transactionHash ?? '',
-      blockNumber: log.blockNumber ?? 0n,
-      logIndex: log.logIndex ?? 0n,
-    }
+  const trades: ArcTrade[] = cachedTradePayload?.trades
+    ? cachedTradePayload.trades.map((row) => ({
+      launchId: Number(row.launchId ?? launchId), trader: String(row.trader ?? ''), isBuy: Boolean(row.isBuy),
+      tokenAmount: BigInt(String(row.tokenAmount ?? '0')), usdcAmount: BigInt(String(row.usdcAmount ?? '0')), price: BigInt(String(row.price ?? '0')),
+      timestamp: BigInt(String(row.eventTimestamp ?? '0')), transactionHash: String(row.transactionHash ?? ''), blockNumber: BigInt(String(row.blockNumber ?? '0')), logIndex: Number(row.logIndex ?? 0),
+    }))
+    : tradeLogs.map((log) => {
+    const args = log.args as { launchId?: bigint; trader?: string; isBuy?: boolean; tokenAmount?: bigint; usdcAmount?: bigint; price?: bigint; timestamp?: bigint }
+    return { launchId: Number(args.launchId ?? launchId), trader: args.trader ?? '', isBuy: Boolean(args.isBuy), tokenAmount: args.tokenAmount ?? 0n, usdcAmount: args.usdcAmount ?? 0n, price: args.price ?? 0n, timestamp: args.timestamp ?? 0n, transactionHash: log.transactionHash ?? '', blockNumber: log.blockNumber ?? 0n, logIndex: log.logIndex ?? 0 }
   }).sort((a, b) => {
     const timestampOrder = a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0
     if (timestampOrder !== 0) return timestampOrder
