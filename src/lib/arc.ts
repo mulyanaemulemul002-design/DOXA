@@ -169,17 +169,6 @@ const launchpadAbi = [
   },
 ] as const
 
-const transferEvent = {
-  type: 'event',
-  name: 'Transfer',
-  anonymous: false,
-  inputs: [
-    { indexed: true, name: 'from', type: 'address' },
-    { indexed: true, name: 'to', type: 'address' },
-    { indexed: false, name: 'value', type: 'uint256' },
-  ],
-} as const
-
 const graduatedEvent = {
   type: 'event',
   name: 'Graduated',
@@ -515,29 +504,6 @@ function getStoredDeploymentBlock(token: string): bigint | undefined {
   return launches.map((launch) => getStoredDeploymentBlock(launch.token)).filter((block): block is bigint => block != null)
   }
 
-  async function resolveDeploymentBlock(token: string): Promise<bigint | undefined> {
-  const cached = getStoredDeploymentBlock(token)
-  if (cached != null) return cached
-
-  const latest = await publicClient.getBlockNumber()
-  const retentionWindow = 100_000n
-  const fromBlock = latest > retentionWindow ? latest - retentionWindow : 0n
-  try {
-    const logs = await publicClient.getLogs({
-      address: DOXA_LAUNCHPAD_ADDRESS,
-      event: tokenCreatedEvent,
-      args: { token: token as Hex },
-      fromBlock,
-      toBlock: latest,
-    })
-    const block = logs[0]?.blockNumber
-    if (block != null) rememberDeploymentBlock(token, block)
-    return block
-  } catch (error) {
-    console.warn('[v0] Unable to resolve token deployment block', { token, fromBlock: fromBlock.toString(), latest: latest.toString(), error: error instanceof Error ? error.message : String(error) })
-    return undefined
-  }
-  }
   
   async function rememberDeploymentFromReceipt(hash: string): Promise<void> {
   const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as Hex })
@@ -563,15 +529,13 @@ export async function readLaunchCount(): Promise<number> {
 }
 
 export async function readLaunchesDirect(): Promise<ArcLaunch[]> {
-  const count = await readLaunchCount()
-  if (count === 0) return []
-  const result = await publicClient.readContract({
-    address: DOXA_LAUNCHPAD_ADDRESS,
-    abi: launchpadAbi,
-    functionName: 'getLaunches',
-    args: [0n, BigInt(count)],
-  })
-  return result as unknown as ArcLaunch[]
+  const response = await fetch('/api/indexer')
+  const payload = await response.json().catch(() => ({})) as { launches?: Array<Record<string, string | boolean>>; error?: string }
+  if (!response.ok || !payload.launches) throw new Error(payload.error || 'Unable to load indexed launches.')
+  return payload.launches.map((row) => ({
+    token: String(row.token), creator: String(row.creator), name: String(row.name), symbol: String(row.symbol), description: String(row.description || ''), metadataURI: String(row.metadataUri || ''),
+    virtualNativeReserve: BigInt(String(row.virtualNativeReserve || '0')), virtualTokenReserve: BigInt(String(row.virtualTokenReserve || '0')), nativeReserve: BigInt(String(row.nativeReserve || '0')), tokenReserve: BigInt(String(row.tokenReserve || '0')), createdAt: BigInt(String(row.createdAt || '0')), graduated: Boolean(row.graduated),
+  }))
 }
 
 export function resolveIpfsUri(uri: string): string {
@@ -659,59 +623,15 @@ export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTape
     .slice(0, 80)
 }
 
-  export async function readLaunchAnalytics(launchId: number, token: string, metadataURI = ''): Promise<ArcAnalytics> {
-  const fromBlock = await resolveDeploymentBlock(token)
-  if (fromBlock == null) {
-  throw new Error('Chart history is unavailable because this token\'s creation block could not be found in the RPC retention window.')
-  }
-  const cachedTradeResponse = await fetch(`/api/indexer?launchId=${launchId}&fromBlock=${fromBlock.toString()}`).catch(() => null)
-  const cachedTradePayload = cachedTradeResponse?.ok ? await cachedTradeResponse.json() as { trades?: Array<Record<string, string | number | boolean>> } : null
-  const [tradeLogs, transferLogs, metadata] = await Promise.all([
-    cachedTradePayload?.trades ? Promise.resolve([]) : publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: tradeEvent, args: { launchId: BigInt(launchId) }, fromBlock }),
-    publicClient.getLogs({ address: token as Hex, event: transferEvent, fromBlock }),
-    readLaunchMetadata(metadataURI),
-  ])
-
-  const trades: ArcTrade[] = cachedTradePayload?.trades
-    ? cachedTradePayload.trades.map((row) => ({
-      launchId: Number(row.launchId ?? launchId), trader: String(row.trader ?? ''), isBuy: Boolean(row.isBuy),
-      tokenAmount: BigInt(String(row.tokenAmount ?? '0')), usdcAmount: BigInt(String(row.usdcAmount ?? '0')), price: BigInt(String(row.price ?? '0')),
-      timestamp: BigInt(String(row.eventTimestamp ?? '0')), transactionHash: String(row.transactionHash ?? ''), blockNumber: BigInt(String(row.blockNumber ?? '0')), logIndex: Number(row.logIndex ?? 0),
-    }))
-    : tradeLogs.map((log) => {
-    const args = log.args as { launchId?: bigint; trader?: string; isBuy?: boolean; tokenAmount?: bigint; usdcAmount?: bigint; price?: bigint; timestamp?: bigint }
-    return { launchId: Number(args.launchId ?? launchId), trader: args.trader ?? '', isBuy: Boolean(args.isBuy), tokenAmount: args.tokenAmount ?? 0n, usdcAmount: args.usdcAmount ?? 0n, price: args.price ?? 0n, timestamp: args.timestamp ?? 0n, transactionHash: log.transactionHash ?? '', blockNumber: log.blockNumber ?? 0n, logIndex: log.logIndex ?? 0 }
-  }).sort((a, b) => {
-    const timestampOrder = a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0
-    if (timestampOrder !== 0) return timestampOrder
-    if (a.blockNumber !== b.blockNumber) return a.blockNumber < b.blockNumber ? -1 : 1
-    if (a.logIndex !== b.logIndex) return a.logIndex < b.logIndex ? -1 : 1
-    return a.transactionHash.localeCompare(b.transactionHash)
-  })
-
-  const balances = new Map<string, bigint>()
-  for (const log of transferLogs) {
-    const args = log.args as { from?: string; to?: string; value?: bigint }
-    const value = args.value ?? 0n
-    const from = (args.from ?? '').toLowerCase()
-    const to = (args.to ?? '').toLowerCase()
-    if (from && from !== '0x0000000000000000000000000000000000000000') {
-      balances.set(from, (balances.get(from) ?? 0n) - value)
-    }
-    if (to) balances.set(to, (balances.get(to) ?? 0n) + value)
-  }
-
-  const supply = BigInt(TOKEN_SUPPLY) * 10n ** 18n
-  const holders = [...balances.entries()]
-    .filter(([address, balance]) => balance > 0n && address !== DOXA_LAUNCHPAD_ADDRESS.toLowerCase())
-    .map(([address, balance]) => ({
-      address,
-      balance,
-      share: Number((balance * 10000n) / supply) / 100,
-    }))
-    .sort((a, b) => (a.balance > b.balance ? -1 : a.balance < b.balance ? 1 : 0))
-
-  return { trades, holders, metadata }
+export async function readLaunchAnalytics(launchId: number, _token: string, metadataURI = ''): Promise<ArcAnalytics> {
+  const response = await fetch(`/api/indexer?launchId=${launchId}`)
+  const payload = await response.json().catch(() => ({})) as { trades?: Array<Record<string, string | number | boolean>>; holders?: Array<{ address: string; balance: string; share: number }>; error?: string }
+  if (!response.ok || !payload.trades || !payload.holders) throw new Error(payload.error || 'Indexed analytics are temporarily unavailable.')
+  const trades: ArcTrade[] = payload.trades.map((row) => ({
+    launchId: Number(row.launchId ?? launchId), trader: String(row.trader ?? ''), isBuy: Boolean(row.isBuy), tokenAmount: BigInt(String(row.tokenAmount ?? '0')), usdcAmount: BigInt(String(row.usdcAmount ?? '0')), price: BigInt(String(row.price ?? '0')), timestamp: BigInt(String(row.eventTimestamp ?? '0')), transactionHash: String(row.transactionHash ?? ''), blockNumber: BigInt(String(row.blockNumber ?? '0')), logIndex: Number(row.logIndex ?? 0),
+  }))
+  const holders: ArcHolder[] = payload.holders.map((holder) => ({ address: holder.address, balance: BigInt(holder.balance), share: holder.share }))
+  return { trades, holders, metadata: await readLaunchMetadata(metadataURI) }
 }
 
 export type OHLCBucket = {
