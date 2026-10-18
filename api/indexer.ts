@@ -34,12 +34,37 @@ async function sync(): Promise<{ fromBlock: bigint; toBlock: bigint }> {
   let from = state[0]?.lastBlock ?? (latest > 100_000n ? latest - 100_000n : 0n)
   if (from > latest) from = latest
   const to = latest
-  const [createdLogs, tradeLogs, graduationLogs] = await Promise.all([
-    logsInChunks(tokenCreatedEvent, from, to), logsInChunks(tradeEvent, from, to), logsInChunks(graduatedEvent, from, to),
+  const [createdLogs, tradeLogs, graduationLogs, currentLaunches] = await Promise.all([
+    logsInChunks(tokenCreatedEvent, from, to),
+    logsInChunks(tradeEvent, from, to),
+    logsInChunks(graduatedEvent, from, to),
+    readCurrentLaunches(),
   ])
+  const createdBlocks = new Map<string, bigint>()
   for (const log of createdLogs as any[]) {
     const a = log.args
-    await db.insert(launches).values({ launchId: a.launchId, token: a.token.toLowerCase(), creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, description: '', metadataUri: a.metadataURI, createdAt: 0n, createdBlock: log.blockNumber, graduated: false }).onConflictDoUpdate({ target: launches.token, set: { creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, metadataUri: a.metadataURI, createdBlock: log.blockNumber, updatedAt: new Date() } })
+    const token = a.token.toLowerCase()
+    createdBlocks.set(token, log.blockNumber)
+    await db.insert(launches).values({ launchId: a.launchId, token, creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, description: '', metadataUri: a.metadataURI, createdAt: 0n, createdBlock: log.blockNumber, graduated: false }).onConflictDoUpdate({ target: launches.token, set: { launchId: a.launchId, creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, metadataUri: a.metadataURI, createdBlock: log.blockNumber, updatedAt: new Date() } })
+  }
+  // The contract snapshot is authoritative for live launch metadata. This also
+  // backfills launches when the RPC prunes the original TokenCreated log.
+  for (const [index, snapshot] of currentLaunches.entries()) {
+    const token = String(snapshot.token).toLowerCase()
+    const existing = await db.select({ createdBlock: launches.createdBlock }).from(launches).where(eq(launches.token, token)).limit(1)
+    const createdBlock = existing[0]?.createdBlock ?? createdBlocks.get(token)
+    if (createdBlock == null) continue
+    await db.update(launches).set({
+      launchId: BigInt(index),
+      creator: String(snapshot.creator).toLowerCase(),
+      name: String(snapshot.name),
+      symbol: String(snapshot.symbol),
+      description: String(snapshot.description || ''),
+      metadataUri: String(snapshot.metadataURI || ''),
+      createdAt: BigInt(String(snapshot.createdAt || '0')),
+      graduated: Boolean(snapshot.graduated),
+      updatedAt: new Date(),
+    }).where(eq(launches.token, token))
   }
   for (const log of tradeLogs as any[]) {
     const a = log.args
