@@ -467,12 +467,12 @@ function rememberDeploymentBlock(token: string, blockNumber: bigint): void {
 }
 
 export async function readLaunchCount(): Promise<number> {
-  const result = await publicClient.readContract({
-    address: DOXA_LAUNCHPAD_ADDRESS,
-    abi: launchpadAbi,
-    functionName: 'launchCount',
-  })
-  return Number(result)
+  const response = await fetch('/api/indexer')
+  const payload = await response.json().catch(() => ({})) as { launches?: unknown[]; error?: string }
+  if (!response.ok || !Array.isArray(payload.launches)) {
+    throw new Error(payload.error || 'Unable to load indexed launch count.')
+  }
+  return payload.launches.length
 }
 
 export async function readLaunchesDirect(): Promise<ArcLaunch[]> {
