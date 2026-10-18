@@ -24,7 +24,6 @@ export const TICKER_MIN_USDC_THRESHOLD = 20
 export const TICKER_LARGE_USDC_THRESHOLD = 500
 const USDC_DECIMALS = 10n ** 18n
 const TICKER_MIN_USDC_WEI = BigInt(TICKER_MIN_USDC_THRESHOLD) * USDC_DECIMALS
-const TICKER_LARGE_USDC_WEI = BigInt(TICKER_LARGE_USDC_THRESHOLD) * USDC_DECIMALS
 
 type RequestArguments = {
   method: string
@@ -168,34 +167,6 @@ const launchpadAbi = [
     }],
   },
 ] as const
-
-const graduatedEvent = {
-  type: 'event',
-  name: 'Graduated',
-  anonymous: false,
-  inputs: [
-    { indexed: true, name: 'launchId', type: 'uint256' },
-    { indexed: true, name: 'token', type: 'address' },
-    { indexed: false, name: 'nativeReserve', type: 'uint256' },
-    { indexed: false, name: 'remainingCurveTokens', type: 'uint256' },
-    { indexed: false, name: 'liquidityTokens', type: 'uint256' },
-  ],
-} as const
-
-const tradeEvent = {
-  type: 'event',
-  name: 'Trade',
-  anonymous: false,
-  inputs: [
-    { indexed: true, name: 'launchId', type: 'uint256' },
-    { indexed: true, name: 'trader', type: 'address' },
-    { indexed: true, name: 'isBuy', type: 'bool' },
-    { indexed: false, name: 'tokenAmount', type: 'uint256' },
-    { indexed: false, name: 'usdcAmount', type: 'uint256' },
-    { indexed: false, name: 'price', type: 'uint256' },
-    { indexed: false, name: 'timestamp', type: 'uint256' },
-  ],
-} as const
 
 export type ArcTrade = {
   launchId: number
@@ -481,30 +452,6 @@ function rememberDeploymentBlock(token: string, blockNumber: bigint): void {
   }
 }
 
-function getStoredDeploymentBlock(token: string): bigint | undefined {
-  const normalized = token.toLowerCase()
-  const cached = deploymentBlocks.get(normalized)
-  if (cached != null) return cached
-  if (typeof window === 'undefined') return undefined
-  try {
-    const stored = JSON.parse(window.localStorage.getItem(deploymentStorageKey) || '{}') as Record<string, string>
-    const value = stored[normalized]
-    if (value) {
-      const block = BigInt(value)
-      deploymentBlocks.set(normalized, block)
-      return block
-    }
-  } catch {
-    // Ignore invalid client cache.
-  }
-  return undefined
-}
-
-  function getKnownLaunchBlocks(launches: ArcLaunch[]): bigint[] {
-  return launches.map((launch) => getStoredDeploymentBlock(launch.token)).filter((block): block is bigint => block != null)
-  }
-
-  
   async function rememberDeploymentFromReceipt(hash: string): Promise<void> {
   const receipt = await publicClient.waitForTransactionReceipt({ hash: hash as Hex })
   for (const log of receipt.logs) {
@@ -576,51 +523,20 @@ export async function uploadLaunchMetadata(
   return result.metadataURI
 }
 
-export async function readLiveTapeEvents(launches: ArcLaunch[]): Promise<ArcTapeEvent[]> {
-  const knownBlocks = getKnownLaunchBlocks(launches)
-  if (knownBlocks.length === 0) return []
-  const fromBlock = knownBlocks.reduce((lowest, block) => block < lowest ? block : lowest)
-  const [tradeLogs, migrationLogs] = await Promise.all([
-    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: tradeEvent, fromBlock }),
-    publicClient.getLogs({ address: DOXA_LAUNCHPAD_ADDRESS, event: graduatedEvent, fromBlock }),
-  ])
-  const byLaunch = new Map(launches.map((launch, index) => [index, launch]))
-  const events: ArcTapeEvent[] = []
-  for (const log of tradeLogs) {
-    const args = log.args as { launchId?: bigint; trader?: string; isBuy?: boolean; usdcAmount?: bigint; timestamp?: bigint }
-    const launch = byLaunch.get(Number(args.launchId ?? -1))
-    if (!launch) continue
-    const usdcAmount = args.usdcAmount ?? 0n
-    events.push({
-      type: args.isBuy ? 'BUY' : 'SELL',
-      tokenName: launch.name,
-      ticker: launch.symbol,
-      usdcAmount,
-      wallet: args.trader ?? '',
-      timestamp: args.timestamp ?? 0n,
-      transactionHash: log.transactionHash ?? '',
-      large: usdcAmount >= TICKER_LARGE_USDC_WEI,
-    })
-  }
-  for (const log of migrationLogs) {
-    const args = log.args as { launchId?: bigint; nativeReserve?: bigint }
-    const launch = byLaunch.get(Number(args.launchId ?? -1))
-    if (!launch) continue
-    events.push({
-      type: 'MIGRATION',
-      tokenName: launch.name,
-      ticker: launch.symbol,
-      usdcAmount: args.nativeReserve ?? 0n,
-      wallet: launch.creator,
-      timestamp: BigInt(Math.floor(Date.now() / 1000)),
-      transactionHash: log.transactionHash ?? '',
-      large: true,
-    })
-  }
-  return events
-    .filter((event) => event.type === 'MIGRATION' || event.usdcAmount >= TICKER_MIN_USDC_WEI)
-    .sort((a, b) => Number(b.timestamp - a.timestamp))
-    .slice(0, 80)
+export async function readLiveTapeEvents(_launches: ArcLaunch[]): Promise<ArcTapeEvent[]> {
+  const response = await fetch('/api/indexer?mode=activity')
+  const payload = await response.json().catch(() => ({})) as { events?: Array<Record<string, string | boolean>>; error?: string }
+  if (!response.ok || !payload.events) throw new Error(payload.error || 'Indexed activity is temporarily unavailable.')
+  return payload.events.map((event) => ({
+    type: String(event.type) as ArcTapeEvent['type'],
+    tokenName: String(event.tokenName || 'Unknown token'),
+    ticker: String(event.ticker || 'TOKEN'),
+    usdcAmount: BigInt(String(event.usdcAmount || '0')),
+    wallet: String(event.wallet || ''),
+    timestamp: BigInt(String(event.timestamp || '0')),
+    transactionHash: String(event.transactionHash || ''),
+    large: Boolean(event.large),
+  })).filter((event) => event.type === 'MIGRATION' || event.usdcAmount >= TICKER_MIN_USDC_WEI).slice(0, 80)
 }
 
 export async function readLaunchAnalytics(launchId: number, _token: string, metadataURI = ''): Promise<ArcAnalytics> {

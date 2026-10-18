@@ -121,6 +121,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         stats: { holderCount: holders.length, volume24h: volume24h.toString(), latestPrice: latestTrade?.price ?? null },
       })
     }
+    if (req.query.mode === 'activity') {
+      const [tradeRows, migrationRows, launchRows] = await Promise.all([
+        db.select().from(trades).orderBy(desc(trades.eventTimestamp)).limit(200),
+        db.select().from(migrations).orderBy(desc(migrations.eventTimestamp)).limit(100),
+        db.select({ launchId: launches.launchId, name: launches.name, symbol: launches.symbol }).from(launches),
+      ])
+      const names = new Map(launchRows.map((row) => [row.launchId.toString(), row]))
+      return res.status(200).json({
+        ...range,
+        events: [
+          ...tradeRows.map((row) => ({ type: row.isBuy ? 'BUY' : 'SELL', tokenName: names.get(row.launchId.toString())?.name ?? 'Unknown token', ticker: names.get(row.launchId.toString())?.symbol ?? 'TOKEN', usdcAmount: row.usdcAmount.toString(), wallet: row.trader, timestamp: row.eventTimestamp.toString(), transactionHash: row.transactionHash, large: BigInt(row.usdcAmount) >= 500n * 10n ** 18n })),
+          ...migrationRows.map((row) => ({ type: 'MIGRATION', tokenName: names.get(row.launchId.toString())?.name ?? 'Unknown token', ticker: names.get(row.launchId.toString())?.symbol ?? 'TOKEN', usdcAmount: '0', wallet: '', timestamp: row.eventTimestamp.toString(), transactionHash: row.transactionHash, large: false })),
+        ].sort((a, b) => Number(BigInt(b.timestamp) - BigInt(a.timestamp))).slice(0, 200),
+      })
+    }
     const all = await db.select().from(launches).orderBy(desc(launches.createdBlock))
     const current = await readCurrentLaunches()
     const snapshots = new Map(current.map((row) => [String(row.token).toLowerCase(), row]))
