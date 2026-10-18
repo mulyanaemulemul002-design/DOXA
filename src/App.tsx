@@ -23,7 +23,7 @@ function mapLaunchToToken(launch: ArcLaunch, index: number): Token {
   const createdLabel = createdMinutes < 60 ? `${createdMinutes}m ago` : createdMinutes < 1440 ? `${Math.floor(createdMinutes / 60)}h ago` : 'yesterday'
   return {
     id: launch.token,
-    launchId: index,
+    launchId: launch.launchId,
     tokenAddress: launch.token,
     name: launch.name,
     ticker: launch.symbol,

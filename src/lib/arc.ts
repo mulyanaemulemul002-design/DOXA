@@ -47,6 +47,7 @@ export type ArcWalletBalances = {
 }
 
 export type ArcLaunch = {
+  launchId: number
   token: string
   creator: string
   name: string
@@ -479,8 +480,8 @@ export async function readLaunchesDirect(): Promise<ArcLaunch[]> {
   const response = await fetch('/api/indexer')
   const payload = await response.json().catch(() => ({})) as { launches?: Array<Record<string, string | boolean>>; error?: string }
   if (!response.ok || !payload.launches) throw new Error(payload.error || 'Unable to load indexed launches.')
-  return payload.launches.map((row) => ({
-    token: String(row.token), creator: String(row.creator), name: String(row.name), symbol: String(row.symbol), description: String(row.description || ''), metadataURI: String(row.metadataUri || ''),
+return payload.launches.map((row) => ({
+  launchId: Number(row.launchId ?? 0), token: String(row.token), creator: String(row.creator), name: String(row.name), symbol: String(row.symbol), description: String(row.description || ''), metadataURI: String(row.metadataUri || row.metadataURI || ''),
     virtualNativeReserve: BigInt(String(row.virtualNativeReserve || '0')), virtualTokenReserve: BigInt(String(row.virtualTokenReserve || '0')), nativeReserve: BigInt(String(row.nativeReserve || '0')), tokenReserve: BigInt(String(row.tokenReserve || '0')), createdAt: BigInt(String(row.createdAt || '0')), graduated: Boolean(row.graduated),
   }))
 }
