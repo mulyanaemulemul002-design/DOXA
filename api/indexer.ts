@@ -34,12 +34,37 @@ async function sync(): Promise<{ fromBlock: bigint; toBlock: bigint }> {
   let from = state[0]?.lastBlock ?? (latest > 100_000n ? latest - 100_000n : 0n)
   if (from > latest) from = latest
   const to = latest
-  const [createdLogs, tradeLogs, graduationLogs] = await Promise.all([
-    logsInChunks(tokenCreatedEvent, from, to), logsInChunks(tradeEvent, from, to), logsInChunks(graduatedEvent, from, to),
+  const [createdLogs, tradeLogs, graduationLogs, currentLaunches] = await Promise.all([
+    logsInChunks(tokenCreatedEvent, from, to),
+    logsInChunks(tradeEvent, from, to),
+    logsInChunks(graduatedEvent, from, to),
+    readCurrentLaunches(),
   ])
+  const createdBlocks = new Map<string, bigint>()
   for (const log of createdLogs as any[]) {
     const a = log.args
-    await db.insert(launches).values({ launchId: a.launchId, token: a.token.toLowerCase(), creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, description: '', metadataUri: a.metadataURI, createdAt: 0n, createdBlock: log.blockNumber, graduated: false }).onConflictDoUpdate({ target: launches.token, set: { creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, metadataUri: a.metadataURI, createdBlock: log.blockNumber, updatedAt: new Date() } })
+    const token = a.token.toLowerCase()
+    createdBlocks.set(token, log.blockNumber)
+    await db.insert(launches).values({ launchId: a.launchId, token, creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, description: '', metadataUri: a.metadataURI, createdAt: 0n, createdBlock: log.blockNumber, graduated: false }).onConflictDoUpdate({ target: launches.token, set: { launchId: a.launchId, creator: a.creator.toLowerCase(), name: a.name, symbol: a.symbol, metadataUri: a.metadataURI, createdBlock: log.blockNumber, updatedAt: new Date() } })
+  }
+  // The contract snapshot is authoritative for live launch metadata. This also
+  // backfills launches when the RPC prunes the original TokenCreated log.
+  for (const [index, snapshot] of currentLaunches.entries()) {
+    const token = String(snapshot.token).toLowerCase()
+    const existing = await db.select({ createdBlock: launches.createdBlock }).from(launches).where(eq(launches.token, token)).limit(1)
+    const createdBlock = existing[0]?.createdBlock ?? createdBlocks.get(token)
+    if (createdBlock == null) continue
+    await db.update(launches).set({
+      launchId: BigInt(index),
+      creator: String(snapshot.creator).toLowerCase(),
+      name: String(snapshot.name),
+      symbol: String(snapshot.symbol),
+      description: String(snapshot.description || ''),
+      metadataUri: String(snapshot.metadataURI || ''),
+      createdAt: BigInt(String(snapshot.createdAt || '0')),
+      graduated: Boolean(snapshot.graduated),
+      updatedAt: new Date(),
+    }).where(eq(launches.token, token))
   }
   for (const log of tradeLogs as any[]) {
     const a = log.args
@@ -74,10 +99,42 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const launch = (await db.select().from(launches).where(eq(launches.launchId, launchId)).limit(1))[0]
       if (!launch) return res.status(404).json({ error: 'Launch not indexed yet', ...range })
       const transferRows = await db.select().from(transfers).where(eq(transfers.token, launch.token))
+      const migrationRows = await db.select().from(migrations).where(eq(migrations.launchId, launchId)).orderBy(desc(migrations.blockNumber))
       const balances = new Map<string, bigint>()
-      for (const row of transferRows) { if (row.fromAddress !== ZERO) balances.set(row.fromAddress, (balances.get(row.fromAddress) ?? 0n) - BigInt(row.amount)); balances.set(row.toAddress, (balances.get(row.toAddress) ?? 0n) + BigInt(row.amount)) }
-      const holders = [...balances.entries()].filter(([, balance]) => balance > 0n && balance !== BigInt(0)).sort((a, b) => a[1] > b[1] ? -1 : 1).map(([address, balance]) => ({ address, balance: balance.toString(), share: Number(balance * 10000n / (1_000_000_000n * 10n ** 18n)) / 100 }))
-      return res.status(200).json({ ...range, launch, trades: rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, serialize(v)]))), holders })
+      for (const row of transferRows) {
+        if (row.fromAddress !== ZERO) balances.set(row.fromAddress, (balances.get(row.fromAddress) ?? 0n) - BigInt(row.amount))
+        if (row.toAddress !== ZERO) balances.set(row.toAddress, (balances.get(row.toAddress) ?? 0n) + BigInt(row.amount))
+      }
+      const holders = [...balances.entries()]
+        .filter(([, balance]) => balance > 0n)
+        .sort((a, b) => a[1] > b[1] ? -1 : 1)
+        .map(([address, balance]) => ({ address, balance: balance.toString(), share: Number(balance * 10000n / (1_000_000_000n * 10n ** 18n)) / 100 }))
+      const now = BigInt(Math.floor(Date.now() / 1000))
+      const volume24h = rows.reduce((sum, row) => row.eventTimestamp >= now - 86400n ? sum + BigInt(row.usdcAmount) : sum, 0n)
+      const latestTrade = rows.at(-1)
+      return res.status(200).json({
+        ...range,
+        launch,
+        trades: rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, serialize(v)]))),
+        migrations: migrationRows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, serialize(v)]))),
+        holders,
+        stats: { holderCount: holders.length, volume24h: volume24h.toString(), latestPrice: latestTrade?.price ?? null },
+      })
+    }
+    if (req.query.mode === 'activity') {
+      const [tradeRows, migrationRows, launchRows] = await Promise.all([
+        db.select().from(trades).orderBy(desc(trades.eventTimestamp)).limit(200),
+        db.select().from(migrations).orderBy(desc(migrations.eventTimestamp)).limit(100),
+        db.select({ launchId: launches.launchId, name: launches.name, symbol: launches.symbol }).from(launches),
+      ])
+      const names = new Map(launchRows.map((row) => [row.launchId.toString(), row]))
+      return res.status(200).json({
+        ...range,
+        events: [
+          ...tradeRows.map((row) => ({ type: row.isBuy ? 'BUY' : 'SELL', tokenName: names.get(row.launchId.toString())?.name ?? 'Unknown token', ticker: names.get(row.launchId.toString())?.symbol ?? 'TOKEN', usdcAmount: row.usdcAmount.toString(), wallet: row.trader, timestamp: row.eventTimestamp.toString(), transactionHash: row.transactionHash, large: BigInt(row.usdcAmount) >= 500n * 10n ** 18n })),
+          ...migrationRows.map((row) => ({ type: 'MIGRATION', tokenName: names.get(row.launchId.toString())?.name ?? 'Unknown token', ticker: names.get(row.launchId.toString())?.symbol ?? 'TOKEN', usdcAmount: '0', wallet: '', timestamp: row.eventTimestamp.toString(), transactionHash: row.transactionHash, large: false })),
+        ].sort((a, b) => Number(BigInt(b.timestamp) - BigInt(a.timestamp))).slice(0, 200),
+      })
     }
     const all = await db.select().from(launches).orderBy(desc(launches.createdBlock))
     const current = await readCurrentLaunches()
